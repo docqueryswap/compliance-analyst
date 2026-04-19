@@ -15,7 +15,7 @@ class LLMClient:
 
         import httpx
         http_client = httpx.Client(
-            timeout=60.0,  # Increased timeout for longer generations
+            timeout=60.0,
             transport=httpx.HTTPTransport(retries=0)
         )
         self.nvidia_client = OpenAI(
@@ -24,7 +24,8 @@ class LLMClient:
             http_client=http_client,
             max_retries=0
         )
-        self.nvidia_model = "mistralai/mistral-7b-instruct-v0.3"
+        # ✅ Stable free model on NVIDIA
+        self.nvidia_model = "meta/llama-3.1-8b-instruct"
 
     def _generate_with_nvidia(self, messages: list, json_mode: bool, max_tokens: int) -> str:
         """Generate with NVIDIA NIM, with fallback for JSON mode."""
@@ -35,7 +36,6 @@ class LLMClient:
             "max_tokens": max_tokens,
         }
 
-        # Some NVIDIA models don't support response_format; we'll try without first if it fails
         try:
             if json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
@@ -43,27 +43,23 @@ class LLMClient:
             return response.choices[0].message.content.strip()
         except Exception as e:
             error_str = str(e)
-            # If JSON mode caused an error, retry without it
             if json_mode and ("response_format" in error_str or "json" in error_str.lower()):
                 logger.warning("NVIDIA JSON mode failed, retrying without response_format")
                 kwargs.pop("response_format", None)
                 response = self.nvidia_client.chat.completions.create(**kwargs)
                 content = response.choices[0].message.content.strip()
-                # If JSON was requested but we got plain text, attempt to extract JSON
                 return self._extract_json_from_text(content)
             raise e
 
     def _extract_json_from_text(self, text: str) -> str:
         """Try to extract a JSON object from plain text."""
-        # Look for a JSON block
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if match:
             try:
-                json.loads(match.group())  # Validate
+                json.loads(match.group())
                 return match.group()
             except:
                 pass
-        # If no valid JSON, wrap in a simple JSON structure as fallback
         logger.warning("Could not extract valid JSON, returning wrapped response")
         return json.dumps({"raw_response": text})
 
@@ -74,9 +70,6 @@ class LLMClient:
         json_mode: bool = False,
         max_tokens: int = 800,
     ) -> str:
-        """
-        Generate a response using NVIDIA NIM.
-        """
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -87,7 +80,6 @@ class LLMClient:
         except Exception as e:
             error_str = str(e)
             logger.error(f"NVIDIA generation failed: {error_str}")
-            # Return a JSON error object if JSON mode was requested, otherwise plain error
             if json_mode:
                 return json.dumps({"error": f"NVIDIA API error: {error_str}"})
             return f"⚠️ NVIDIA API error: {error_str}"
