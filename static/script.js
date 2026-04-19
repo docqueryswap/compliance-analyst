@@ -11,8 +11,13 @@ const citationBox = document.getElementById('citationBox');
 const sourceList = document.getElementById('sourceList');
 const styleSelect = document.getElementById('styleSelect');
 
+console.log('Elements loaded:', {
+    fileInput, uploadBtn, fileName, uploadStatus, auditBtn, streamBtn, reportContent
+});
+
 // ---------- FILE UPLOAD ----------
 uploadBtn.addEventListener('click', () => {
+    console.log('Upload button clicked');
     fileInput.click();
 });
 
@@ -27,6 +32,7 @@ fileInput.addEventListener('change', async (e) => {
     try {
         const res = await fetch('/upload', { method: 'POST', body: formData });
         const data = await res.json();
+        console.log('Upload response:', data);
         if (data.error) {
             uploadStatus.textContent = `❌ ${data.error}`;
         } else {
@@ -35,14 +41,17 @@ fileInput.addEventListener('change', async (e) => {
             reportContent.textContent = '✅ Document ready. Choose an action.';
             auditBtn.disabled = false;
             streamBtn.disabled = false;
+            console.log('Audit button enabled, clientId:', clientId);
         }
     } catch (err) {
         uploadStatus.textContent = '❌ Upload failed';
+        console.error('Upload error:', err);
     }
 });
 
 // ---------- AUDIT (NON‑BLOCKING CRITIQUE) ----------
 auditBtn.addEventListener('click', async () => {
+    console.log('Audit button clicked, clientId:', clientId, 'uploadedFileName:', uploadedFileName);
     if (!uploadedFileName) {
         reportContent.textContent = 'Please upload a document first.';
         return;
@@ -57,26 +66,24 @@ auditBtn.addEventListener('click', async () => {
             body: JSON.stringify({ client_id: clientId })
         });
         const data = await res.json();
+        console.log('Audit response:', data);
         if (data.error) {
             reportContent.textContent = 'Error: ' + data.error;
             return;
         }
 
-        // Extract draft report (backend returns draft_report)
         const draft = typeof data.draft_report === 'string' 
             ? data.draft_report 
             : JSON.stringify(data.draft_report, null, 2);
         const plan = data.plan || [];
         const context = data.retrieved_context || [];
 
-        // Display draft immediately
         reportContent.innerHTML = `
             <h4>📄 Draft Report</h4>
             <div style="white-space:pre-wrap; background:#f9f9f9; padding:16px; border-radius:8px;">${draft}</div>
             <div id="critiqueSection" style="margin-top:16px;">⏳ Fetching critique...</div>
         `;
 
-        // Fire off critique request (non‑blocking)
         fetch('/critique', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -84,6 +91,7 @@ auditBtn.addEventListener('click', async () => {
         })
         .then(res => res.json())
         .then(critData => {
+            console.log('Critique response:', critData);
             const passed = critData.passes_validation === true;
             const score = passed ? '94%' : '76%';
             const color = passed ? '#1e7a1e' : '#b85e00';
@@ -98,7 +106,8 @@ auditBtn.addEventListener('click', async () => {
                 </div>
             `;
         })
-        .catch(() => {
+        .catch(err => {
+            console.error('Critique error:', err);
             document.getElementById('critiqueSection').innerHTML = `
                 <div style="padding-top:16px; border-top:2px solid #ccc;">
                     <span style="background:#b85e00; color:white; padding:4px 12px; border-radius:20px; font-weight:600;">
@@ -111,10 +120,11 @@ auditBtn.addEventListener('click', async () => {
 
     } catch (e) {
         reportContent.textContent = 'Error: ' + e.message;
+        console.error('Audit error:', e);
     }
 });
 
-// ---------- STREAMING AUDIT ----------
+// ---------- STREAMING AUDIT (unchanged) ----------
 streamBtn.addEventListener('click', () => {
     if (!uploadedFileName) {
         reportContent.textContent = 'Please upload a document first.';
@@ -149,7 +159,7 @@ streamBtn.addEventListener('click', () => {
     };
 });
 
-// ---------- ACTION SELECTION (Summarize/Ask/Correlate/Report/Edit) ----------
+// ---------- ACTION SELECTION (unchanged) ----------
 let currentAction = 'summarize';
 const actionBtns = document.querySelectorAll('.action-btn');
 const queryInput = document.getElementById('queryInput');
