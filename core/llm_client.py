@@ -18,68 +18,46 @@ class LLMClient:
             timeout=60.0,
             transport=httpx.HTTPTransport(retries=0)
         )
-        self.nvidia_client = OpenAI(
+        self.client = OpenAI(
             base_url="https://integrate.api.nvidia.com/v1",
             api_key=nvidia_api_key,
             http_client=http_client,
             max_retries=0
         )
-        # ✅ Stable free model on NVIDIA
-        self.nvidia_model = "meta/llama-3.1-8b-instruct"
-
-    def _generate_with_nvidia(self, messages: list, json_mode: bool, max_tokens: int) -> str:
-        """Generate with NVIDIA NIM, with fallback for JSON mode."""
-        kwargs = {
-            "model": self.nvidia_model,
-            "messages": messages,
-            "temperature": 0.3,
-            "max_tokens": max_tokens,
-        }
-
-        try:
-            if json_mode:
-                kwargs["response_format"] = {"type": "json_object"}
-            response = self.nvidia_client.chat.completions.create(**kwargs)
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            error_str = str(e)
-            if json_mode and ("response_format" in error_str or "json" in error_str.lower()):
-                logger.warning("NVIDIA JSON mode failed, retrying without response_format")
-                kwargs.pop("response_format", None)
-                response = self.nvidia_client.chat.completions.create(**kwargs)
-                content = response.choices[0].message.content.strip()
-                return self._extract_json_from_text(content)
-            raise e
-
-    def _extract_json_from_text(self, text: str) -> str:
-        """Try to extract a JSON object from plain text."""
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            try:
-                json.loads(match.group())
-                return match.group()
-            except:
-                pass
-        logger.warning("Could not extract valid JSON, returning wrapped response")
-        return json.dumps({"raw_response": text})
+        self.model = "meta/llama-3.1-8b-instruct"
 
     def generate(
         self,
         prompt: str,
         system: str = None,
         json_mode: bool = False,
-        max_tokens: int = 800,
+        max_tokens: int = 1024,
     ) -> str:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.3,
+            "max_tokens": max_tokens,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+
         try:
-            return self._generate_with_nvidia(messages, json_mode, max_tokens)
+            response = self.client.chat.completions.create(**kwargs)
+            content = response.choices[0].message.content.strip()
+            # If JSON was expected but we got plain text, try to extract JSON
+            if json_mode and not content.startswith("{"):
+                match = re.search(r"\{.*\}", content, re.DOTALL)
+                if match:
+                    content = match.group()
+            return content
         except Exception as e:
-            error_str = str(e)
-            logger.error(f"NVIDIA generation failed: {error_str}")
+            logger.error(f"NVIDIA generation failed: {e}")
             if json_mode:
-                return json.dumps({"error": f"NVIDIA API error: {error_str}"})
-            return f"⚠️ NVIDIA API error: {error_str}"
+                return json.dumps({"error": str(e)})
+            return f"⚠️ NVIDIA API error: {str(e)}"
