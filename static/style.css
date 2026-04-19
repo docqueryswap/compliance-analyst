@@ -1,0 +1,45 @@
+body { 
+    font-family: system-ui, -apple-system, sans-serif; 
+    max-width: 1000px; 
+    margin: 2rem auto; 
+    padding: 1rem; 
+    background: #f8fafc; 
+}
+.container { 
+    background: white; 
+    border-radius: 16px; 
+    padding: 2rem; 
+    box-shadow: 0 4px 6px rgba(0,0,0,0.05); 
+}
+button { 
+    background: #1e4a7a; 
+    color: white; 
+    border: none; 
+    padding: 10px 20px; 
+    border-radius: 8px; 
+    cursor: pointer; 
+    margin: 5px; 
+    font-weight: 500;
+}
+button:disabled { 
+    background: #94a3b8; 
+    cursor: not-allowed; 
+}
+.output-box { 
+    background: #f8fafc; 
+    border-radius: 12px; 
+    padding: 1.5rem; 
+    margin-top: 1.5rem; 
+    border: 1px solid #e2e8f0;
+}
+#uploadStatus { 
+    margin: 10px 0; 
+    font-weight: 500;
+}
+#reportContent {
+    line-height: 1.6;
+}
+#streamOutput {
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 0.95rem;
+}
