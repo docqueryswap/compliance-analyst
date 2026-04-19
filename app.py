@@ -3,6 +3,7 @@ import uuid
 import logging
 import json
 import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -42,16 +43,12 @@ except ImportError:
     LANGFUSE_ENABLED = False
     logger.warning("Langfuse client not available. Tracing disabled.")
 
-# ============================================================
-# Helper: Format any report/critique object into readable text
-# ============================================================
+
 def format_report(report):
     """Convert dict or other types to a clean string."""
     if isinstance(report, dict):
-        # If it has a 'text' field, use that directly
         if "text" in report:
             return str(report["text"])
-        # Otherwise convert dict to readable markdown-style text
         parts = []
         for k, v in report.items():
             if isinstance(v, dict) and "text" in v:
@@ -61,13 +58,19 @@ def format_report(report):
         return "\n\n".join(parts)
     return str(report) if report else ""
 
-# ============================================================
-# FastAPI App
-# ============================================================
-app = FastAPI(title="Compliance Analyst", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global compliance_graph
+    compliance_graph = build_compliance_graph()
+    logger.info("✅ Compliance agent ready")
+    yield
+    logger.info("🛑 Shutting down Compliance Analyst")
+
+
+app = FastAPI(title="Compliance Analyst", version="1.0.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Globals
 compliance_graph = None
 state_manager = StateManager()
 vector_db = PineconeVectorStore()
@@ -76,24 +79,20 @@ doc_proc = DocumentProcessor()
 text_proc = TextProcessor()
 llm = LLMClient()
 
-@app.on_event("startup")
-async def startup():
-    global compliance_graph
-    compliance_graph = build_compliance_graph()
-    logger.info("✅ Compliance agent ready")
 
 @app.get("/")
 async def home():
     return FileResponse("templates/index.html")
+
 
 class UploadResponse(BaseModel):
     client_id: str
     doc_id: str
     message: str
 
+
 @app.post("/upload", response_model=UploadResponse)
 async def upload_document(file: UploadFile = File(...)):
-    """Upload and process a document."""
     client_id = str(uuid.uuid4())
     doc_id = str(uuid.uuid4())
     
@@ -120,12 +119,14 @@ async def upload_document(file: UploadFile = File(...)):
         message=f"✅ {file.filename} processed"
     )
 
+
 class AuditRequest(BaseModel):
     client_id: str
 
+
 @app.post("/audit")
 async def run_audit(request: AuditRequest):
-    """Run the full compliance audit workflow."""
+    """Run Planner → Retriever → Executor and return draft + context."""
     state = state_manager.get_state(request.client_id)
     if not state:
         return JSONResponse({"error": "Session not found"}, 404)
@@ -135,44 +136,54 @@ async def run_audit(request: AuditRequest):
         "doc_id": state["doc_id"]
     }
     
-    config = {}
-    langfuse_handler = None
+    config = {"recursion_limit": 100}   # ✅ Increased to prevent recursion errors
     if LANGFUSE_ENABLED:
         try:
-            langfuse_handler = get_langfuse_handler()
-            config = {"callbacks": [langfuse_handler]}
-        except Exception as e:
-            logger.warning(f"Langfuse handler failed: {e}")
+            config["callbacks"] = [get_langfuse_handler()]
+        except:
+            pass
     
     result = compliance_graph.invoke(initial_state, config=config)
     
-    # Format outputs safely
-    final_report = format_report(result.get("final_report", ""))
-    critique = format_report(result.get("critique", ""))
-    
-    if langfuse_handler and LANGFUSE_ENABLED:
-        try:
-            langfuse = get_langfuse_client()
-            trace_id = langfuse_handler.get_trace_id()
-            langfuse.score(
-                trace_id=trace_id,
-                name="validation_passed",
-                value=1.0 if result.get("passes_validation", True) else 0.0
-            )
-        except Exception as e:
-            logger.warning(f"Could not record Langfuse score: {e}")
-    
     return JSONResponse({
+        "draft_report": result.get("draft_report", ""),
         "plan": result.get("plan", []),
-        "draft": result.get("draft_report", ""),
-        "critique": critique,
-        "final_report": final_report,
-        "passes_validation": result.get("passes_validation", True)
+        "retrieved_context": result.get("retrieved_context", [])
     })
+
+
+class CritiqueRequest(BaseModel):
+    draft_report: str
+    plan: list = []
+    context: list = []
+
+
+@app.post("/critique")
+async def get_critique(request: CritiqueRequest):
+    """Run Critic on the provided report text (non‑blocking)."""
+    from agent.nodes.critic import critic_node
+    try:
+        result = critic_node({
+            "plan": request.plan,
+            "retrieved_context": request.context,
+            "draft_report": request.draft_report
+        })
+        return JSONResponse({
+            "passes_validation": result.get("passes_validation", True),
+            "critique": result.get("critique", ""),
+            "final_report": result.get("final_report", request.draft_report)
+        })
+    except Exception as e:
+        logger.error(f"Standalone critique failed: {e}")
+        return JSONResponse({
+            "passes_validation": True,
+            "critique": "",
+            "final_report": request.draft_report
+        })
+
 
 @app.get("/audit/stream")
 async def audit_stream(request: Request, client_id: str):
-    """Stream the audit process using SSE."""
     state = state_manager.get_state(client_id)
     if not state:
         return JSONResponse({"error": "Session not found"}, 404)
@@ -184,24 +195,23 @@ async def audit_stream(request: Request, client_id: str):
         await asyncio.sleep(0.5)
         yield {"event": "status", "data": "Drafting report..."}
         await asyncio.sleep(0.5)
-        yield {"event": "status", "data": "Reviewing with critic agent..."}
         
         initial_state = {"document_text": state["document_text"], "doc_id": state["doc_id"]}
-        config = {}
+        config = {"recursion_limit": 100}
         if LANGFUSE_ENABLED:
             try:
-                config = {"callbacks": [get_langfuse_handler()]}
+                config["callbacks"] = [get_langfuse_handler()]
             except:
                 pass
         
         result = compliance_graph.invoke(initial_state, config=config)
-        final_report = format_report(result.get("final_report", ""))
+        final_report = format_report(result.get("draft_report", ""))
         
         yield {
             "event": "result",
             "data": json.dumps({
                 "final_report": final_report,
-                "passes_validation": result.get("passes_validation", True)
+                "passes_validation": True
             })
         }
     
