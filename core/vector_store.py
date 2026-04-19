@@ -40,7 +40,6 @@ class PineconeVectorStore:
                 "metadata": {"text": chunk, "doc_id": doc_id}
             })
         self.index.upsert(vectors=records)
-        logger.info(f"Upserted {len(records)} vectors for doc {doc_id}")
 
     def search_similar(self, query_embedding, top_k: int = 5, doc_id: str = None):
         filter_dict = {"doc_id": {"$eq": doc_id}} if doc_id else None
