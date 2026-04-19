@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 from agent.graph import build_compliance_graph
 from core.state_manager import StateManager
 from core.vector_store import PineconeVectorStore
-from sentence_transformers import SentenceTransformer
+from core.embeddings import get_embedder
 from document_processor import DocumentProcessor
 from text_processor import TextProcessor
 
@@ -25,7 +25,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 compliance_graph = build_compliance_graph()
 state_manager = StateManager()
 vector_db = PineconeVectorStore()
-embedder = SentenceTransformer("all-MiniLM-L6-v2")  # 384‑dim to match index
+embedder = get_embedder()
 doc_proc = DocumentProcessor()
 text_proc = TextProcessor()
 
