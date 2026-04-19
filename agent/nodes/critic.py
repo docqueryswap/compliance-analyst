@@ -11,9 +11,8 @@ def _extract_json(text: str) -> dict:
     """Robust JSON extraction from LLM output."""
     if not text:
         return {}
-
-    # Remove markdown code fences
     cleaned = text.strip()
+    # Remove markdown fences
     if cleaned.startswith("```json"):
         cleaned = cleaned[7:]
     elif cleaned.startswith("```"):
@@ -21,26 +20,20 @@ def _extract_json(text: str) -> dict:
     if cleaned.endswith("```"):
         cleaned = cleaned[:-3]
     cleaned = cleaned.strip()
-
-    # Try direct parsing
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         pass
-
-    # Try to find a JSON object using regex
     match = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if match:
         try:
             return json.loads(match.group())
         except json.JSONDecodeError:
             pass
-
     return {}
 
 
 def _generate_fallback_critique(draft: str) -> str:
-    """Generate a sensible fallback critique based on draft content."""
     draft_lower = draft.lower()
     if "executive summary" in draft_lower and "recommendation" in draft_lower:
         return "The report is well-structured and covers the required sections. No major issues detected."
@@ -57,10 +50,14 @@ def critic_node(state: dict) -> dict:
     context = state.get("retrieved_context", [])
     draft = state.get("draft_report", "")
 
-    prompt = f"""You are a meticulous compliance officer. Review the draft report against the plan and context. Output a JSON object with:
-- "passes_validation": true/false
-- "feedback": detailed critique (at least 2-3 sentences)
+    # Improved prompt with explicit JSON example
+    prompt = f"""You are a meticulous compliance officer. Review the draft report against the plan and context. 
+You MUST output ONLY a valid JSON object with exactly these three keys:
+- "passes_validation": true or false
+- "feedback": a detailed critique (2-3 sentences)
 - "final_report": the improved report as plain text
+
+Example: {{"passes_validation": true, "feedback": "The report accurately identifies key obligations and provides actionable recommendations.", "final_report": "..."}}
 
 Plan: {plan}
 Context (excerpt): {str(context)[:800]}
@@ -68,27 +65,28 @@ Draft: {draft}
 
 JSON:"""
 
-    response = llm.generate(prompt, json_mode=True)
-    logger.info(f"Critic raw response (first 500 chars): {response[:500]}")
+    # Try up to 2 times
+    for attempt in range(2):
+        response = llm.generate(prompt, json_mode=True)
+        logger.info(f"Critic raw response (attempt {attempt+1}, first 500 chars): {response[:500]}")
+        result = _extract_json(response)
+        if result:
+            break
+    else:
+        logger.warning("All attempts to get valid JSON failed. Using fallback.")
+        result = {}
 
-    # Attempt to parse JSON
-    result = _extract_json(response)
-
-    # If parsing failed completely, use fallback
     if not result:
-        logger.warning("Could not parse JSON from Critic response. Using fallback critique.")
         result = {
             "passes_validation": True,
             "feedback": _generate_fallback_critique(draft),
             "final_report": draft,
         }
 
-    # Ensure all expected keys exist
     passes = bool(result.get("passes_validation", True))
     critique = result.get("feedback", "").strip()
     final_report = result.get("final_report", draft)
 
-    # If critique is still empty, generate one
     if not critique:
         critique = _generate_fallback_critique(draft)
 
