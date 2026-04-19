@@ -24,7 +24,7 @@ class LLMClient:
             http_client=http_client,
             max_retries=0
         )
-        self.nvidia_model = "mistralai/mistral-7b-instruct-v0.3"   # ✅ Free NVIDIA endpoint
+        self.nvidia_model = "mistralai/mistral-7b-instruct-v0.3"   # Free NVIDIA endpoint
 
     def _generate_with_nvidia(self, messages: list, json_mode: bool, max_tokens: int) -> str:
         """Generate with NVIDIA NIM."""
