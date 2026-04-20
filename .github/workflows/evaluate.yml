@@ -1,1 +1,27 @@
 
+name: Evaluate Compliance Analyst
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * 1'  # Every Monday at 08:00 UTC
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: pip install requests
+      - name: Run evaluation
+        env:
+          SPACE_URL: https://docqueryswap-compliance-analyst.hf.space
+        run: python evaluation/run_evaluation.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-report
+          path: evaluation/evaluation_report.json
