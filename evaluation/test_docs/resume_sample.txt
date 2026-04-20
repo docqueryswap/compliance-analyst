@@ -1,1 +1,14 @@
 
+JANE SMITH
+Software Engineer
+
+SKILLS
+Python, JavaScript, React, Node.js, AWS, Docker
+
+EXPERIENCE
+Senior Developer at TechCorp (2020-Present)
+- Led development of microservices architecture
+- Mentored junior engineers
+
+EDUCATION
+B.S. Computer Science, University of Washington
