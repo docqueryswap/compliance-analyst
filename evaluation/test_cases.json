@@ -1,1 +1,15 @@
 
+[
+  {
+    "id": "contract_001",
+    "document_path": "evaluation/test_docs/contract_sample.txt",
+    "expected_doc_type": "contract",
+    "should_contain_keywords": ["Executive Summary", "Key Findings", "Recommendations"]
+  },
+  {
+    "id": "resume_001",
+    "document_path": "evaluation/test_docs/resume_sample.txt",
+    "expected_doc_type": "resume",
+    "should_contain_keywords": ["skills", "experience"]
+  }
+]
