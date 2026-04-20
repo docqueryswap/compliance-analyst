@@ -1,4 +1,3 @@
-
 import json
 import time
 import requests
@@ -25,6 +24,42 @@ def run_audit(client_id: str) -> Dict[str, Any]:
     response.raise_for_status()
     return response.json()
 
+def infer_document_type(audit: Dict[str, Any]) -> str:
+    """Infer document type from plan or draft report content."""
+    # First, check if the field exists (in case you later add it)
+    if "document_type" in audit:
+        return audit["document_type"]
+    
+    # Look at plan items and draft report for keywords
+    plan = audit.get("plan", [])
+    draft = audit.get("draft_report", "").lower()
+    plan_text = " ".join(plan).lower()
+    
+    contract_keywords = ["contract", "agreement", "termination", "clause", "obligation"]
+    resume_keywords = ["resume", "skills", "experience", "education", "job"]
+    policy_keywords = ["policy", "compliance", "regulation", "guideline"]
+    
+    # Check draft report first (more reliable)
+    for kw in contract_keywords:
+        if kw in draft:
+            return "contract"
+    for kw in resume_keywords:
+        if kw in draft:
+            return "resume"
+    for kw in policy_keywords:
+        if kw in draft:
+            return "policy"
+    
+    # Fallback to plan text
+    if any(kw in plan_text for kw in contract_keywords):
+        return "contract"
+    if any(kw in plan_text for kw in resume_keywords):
+        return "resume"
+    if any(kw in plan_text for kw in policy_keywords):
+        return "policy"
+    
+    return "other"
+
 def evaluate_case(case: Dict[str, Any]) -> Dict[str, Any]:
     start = time.time()
     result = {
@@ -40,8 +75,11 @@ def evaluate_case(case: Dict[str, Any]) -> Dict[str, Any]:
         client_id = upload_document(case["document_path"])
         audit = run_audit(client_id)
         draft = audit.get("draft_report", "")
-        detected_type = audit.get("document_type", "other")
+        
+        # Infer document type instead of relying on a missing field
+        detected_type = infer_document_type(audit)
         result["doc_type_match"] = (detected_type == case["expected_doc_type"])
+        
         keywords_found = [kw for kw in case.get("should_contain_keywords", []) if kw.lower() in draft.lower()]
         result["keywords_present"] = keywords_found
         all_keywords = len(keywords_found) == len(case.get("should_contain_keywords", []))
