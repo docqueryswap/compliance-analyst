@@ -3,6 +3,9 @@ import logging
 import json
 import re
 from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
