@@ -3,22 +3,23 @@ from core.llm_client import LLMClient
 
 llm = LLMClient()
 
+
 def planner_node(state: dict) -> dict:
     document_text = state.get("document_text", "")
-    
-    # First, detect document type
-    detection_prompt = f"""Analyze the first 1000 characters of this document and classify it into ONE of these categories:
-- "resume" (CV, curriculum vitae, job application)
-- "contract" (legal agreement, terms of service)
-- "policy" (company policy, compliance document)
-- "report" (research, analysis, article)
+
+    # Detect document type
+    detection_prompt = f"""Analyze the first 1000 characters of this document and classify it into ONE category:
+- "resume"
+- "contract"
+- "policy"
+- "report"
 - "other"
 
-Document excerpt:
-{document_text[:1000]}
+Return ONLY a JSON object: {{"document_type": "category"}}
 
-Return ONLY a JSON object with a single key "document_type". Example: {{"document_type": "resume"}}"""
-    
+Document:
+{document_text[:1000]}"""
+
     doc_type = "other"
     try:
         response = llm.generate(detection_prompt, json_mode=True)
@@ -26,53 +27,28 @@ Return ONLY a JSON object with a single key "document_type". Example: {{"documen
         doc_type = result.get("document_type", "other")
     except:
         pass
-    
-    # Generate plan based on document type
+
+    # Generate plan
     if doc_type == "resume":
-        plan_prompt = f"""You are a career coach reviewing a resume. Break down the task of analyzing this resume into 3-5 specific subtasks. Output ONLY a JSON array of strings. Example: ["Extract key skills", "Check for quantifiable achievements", "Assess formatting and readability"]
-
-Resume excerpt:
-{document_text[:2000]}
-
-JSON array:"""
+        prompt = f"""Break this resume analysis into 3-5 subtasks. Return ONLY a JSON array of strings.
+Resume: {document_text[:1500]}"""
     elif doc_type == "contract":
-        plan_prompt = f"""You are a compliance expert. Break down the task of auditing this contract into a list of 3-5 specific subtasks. Output ONLY a JSON array of strings. Example: ["Identify key obligations", "Check for missing clauses", "Assess overall risk"]
-
-Contract excerpt:
-{document_text[:2000]}
-
-JSON array:"""
+        prompt = f"""Break this contract audit into 3-5 subtasks. Return ONLY a JSON array of strings.
+Contract: {document_text[:1500]}"""
     elif doc_type == "policy":
-        plan_prompt = f"""You are a policy analyst. Break down the task of reviewing this policy document into a list of 3-5 specific subtasks. Output ONLY a JSON array of strings. Example: ["Identify compliance requirements", "Check for gaps in coverage", "Assess clarity and enforceability"]
-
-Policy excerpt:
-{document_text[:2000]}
-
-JSON array:"""
+        prompt = f"""Break this policy review into 3-5 subtasks. Return ONLY a JSON array of strings.
+Policy: {document_text[:1500]}"""
     else:
-        plan_prompt = f"""You are a document analyst. Break down the task of reviewing this document into a list of 3-5 specific subtasks. Output ONLY a JSON array of strings. Example: ["Summarize main points", "Identify key entities", "Extract actionable insights"]
+        prompt = f"""Break this document analysis into 3-5 subtasks. Return ONLY a JSON array of strings.
+Document: {document_text[:1500]}"""
 
-Document excerpt:
-{document_text[:2000]}
-
-JSON array:"""
-    
-    response = llm.generate(plan_prompt, json_mode=True)
+    plan = []
     try:
+        response = llm.generate(prompt, json_mode=True)
         plan = json.loads(response)
-        if isinstance(plan, list):
-            return {"plan": plan, "document_type": doc_type}
+        if not isinstance(plan, list):
+            plan = ["Summarize document", "Identify key points", "Provide recommendations"]
     except:
-        pass
-    
-    # Fallback plans by document type
-    if doc_type == "resume":
-        fallback = ["Extract skills and experience", "Identify achievements", "Evaluate formatting", "Suggest improvements"]
-    elif doc_type == "contract":
-        fallback = ["Identify key obligations", "Check for missing clauses", "Assess overall risk"]
-    elif doc_type == "policy":
-        fallback = ["Identify compliance requirements", "Check for gaps", "Assess clarity"]
-    else:
-        fallback = ["Summarize document", "Extract key points", "Identify recommendations"]
-    
-    return {"plan": fallback, "document_type": doc_type}
+        plan = ["Summarize document", "Identify key points", "Provide recommendations"]
+
+    return {"plan": plan, "document_type": doc_type}

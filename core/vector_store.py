@@ -5,22 +5,32 @@ from pinecone import Pinecone, ServerlessSpec
 
 logger = logging.getLogger(__name__)
 
+
 class PineconeVectorStore:
-    def __init__(self, index_name="multiagent"):   # <-- CHANGE TO EXISTING INDEX
+    def __init__(self, index_name: str = "multiagent-384"):
         self.index_name = index_name
         api_key = os.getenv("PINECONE_API_KEY")
         if not api_key:
-            raise ValueError("PINECONE_API_KEY not set")
+            raise ValueError("PINECONE_API_KEY environment variable not set")
         self.pc = Pinecone(api_key=api_key)
-        
-        # Check if index exists, but DO NOT create a new one
-        existing = self.pc.list_indexes().names()
-        if self.index_name not in existing:
-            raise RuntimeError(f"Index '{self.index_name}' not found. Use an existing index or create one manually.")
-        
+        self._ensure_index()
         self.index = self.pc.Index(self.index_name)
         logger.info(f"✅ Connected to Pinecone index: {self.index_name}")
-    
+
+    def _ensure_index(self):
+        existing = self.pc.list_indexes().names()
+        if self.index_name not in existing:
+            logger.info(f"Index '{self.index_name}' not found. Creating...")
+            self.pc.create_index(
+                name=self.index_name,
+                dimension=384,
+                metric="cosine",
+                spec=ServerlessSpec(cloud="aws", region="us-east-1")
+            )
+            while not self.pc.describe_index(self.index_name).status.get("ready", False):
+                time.sleep(2)
+            logger.info(f"Index '{self.index_name}' created.")
+
     def upsert_document(self, doc_id: str, chunks: list, embeddings: list):
         records = []
         for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
@@ -30,8 +40,8 @@ class PineconeVectorStore:
                 "metadata": {"text": chunk, "doc_id": doc_id}
             })
         self.index.upsert(vectors=records)
-    
-    def search(self, query_embedding, top_k=5, doc_id=None):
+
+    def search_similar(self, query_embedding, top_k: int = 5, doc_id: str = None):
         filter_dict = {"doc_id": {"$eq": doc_id}} if doc_id else None
         result = self.index.query(
             vector=query_embedding.tolist(),
@@ -40,10 +50,3 @@ class PineconeVectorStore:
             filter=filter_dict
         )
         return [match["metadata"]["text"] for match in result["matches"]]
-    
-    def delete_by_metadata(self, metadata_filter):
-        try:
-            self.index.delete(filter=metadata_filter)
-            logger.info(f"Deleted vectors with filter: {metadata_filter}")
-        except Exception as e:
-            logger.error(f"Error deleting vectors: {e}")
