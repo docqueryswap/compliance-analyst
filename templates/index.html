@@ -1,30 +1,67 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Compliance Analyst</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+
     <div class="container">
         <h1>📋 Autonomous Compliance Analyst</h1>
-        <p>Upload a contract or policy document. AI agents will audit it and generate a compliance report.</p>
-        
+
+        <p>
+            Upload a contract or policy document.
+            AI agents will audit it, validate compliance risk,
+            and generate an improved final compliance report.
+        </p>
+
+        <!-- Upload Section -->
         <div class="upload-area" id="uploadArea">
-            <input type="file" id="fileInput" accept=".pdf,.docx,.txt" style="display:none">
-            <button id="uploadBtn">📤 Choose Document</button>
-            <span id="fileName">No file selected</span>
+            <input
+                type="file"
+                id="fileInput"
+                accept=".pdf,.docx,.txt"
+                style="display: none;"
+            >
+
+            <button id="uploadBtn">
+                📤 Choose Document
+            </button>
+
+            <span id="fileName">
+                No file selected
+            </span>
         </div>
-        
+
+        <!-- Upload Status -->
         <div id="uploadStatus"></div>
-        
-        <button id="auditBtn" disabled>🔍 Run Compliance Audit</button>
-        <button id="streamBtn" disabled>📡 Stream Audit</button>
-        
-        <div id="output" class="output-box">
-            <h3>Audit Report</h3>
-            <div id="reportContent">Upload a document to begin.</div>
+
+        <!-- Action Buttons -->
+        <div style="margin-top: 20px;">
+            <button id="auditBtn" disabled>
+                🔍 Run Compliance Audit
+            </button>
+
+            <button id="streamBtn" disabled>
+                📡 Stream Audit
+            </button>
+        </div>
+
+        <!-- Output Section -->
+        <div id="output" class="output-box" style="margin-top: 30px;">
+
+            <h2>Audit Report</h2>
+
+            <div id="reportContent">
+                Upload a document to begin.
+            </div>
+
         </div>
     </div>
+
     <script src="/static/script.js"></script>
+
 </body>
 </html>
