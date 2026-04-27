@@ -134,6 +134,8 @@ async def get_critique(request: CritiqueRequest):
             "passes_validation": result.get("passes_validation", True),
             "critique": result.get("critique", ""),
             "final_report": result.get("final_report", request.draft_report),
+            "confidence_score": result.get("confidence_score", 55),
+            "missing_risks": result.get("missing_risks", []),
         })
     except Exception as e:
         logger.error(f"Critique failed: {e}")
@@ -141,4 +143,6 @@ async def get_critique(request: CritiqueRequest):
             "passes_validation": True,
             "critique": "",
             "final_report": request.draft_report,
+            "confidence_score": 55,
+            "missing_risks": [],
         })
