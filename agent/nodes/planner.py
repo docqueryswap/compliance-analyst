@@ -4,51 +4,53 @@ from core.llm_client import LLMClient
 llm = LLMClient()
 
 
+DEFAULT_PLAN = [
+    "Summarize document",
+    "Identify key points",
+    "Provide recommendations",
+]
+
+
 def planner_node(state: dict) -> dict:
     document_text = state.get("document_text", "")
 
-    # Detect document type
-    detection_prompt = f"""Analyze the first 1000 characters of this document and classify it into ONE category:
+    prompt = f"""Analyze the document excerpt and return a JSON object with:
+- "document_type": exactly one of "resume", "contract", "policy", "report", "other"
+- "plan": an array of 3-5 concise analysis subtasks tailored to the document
+
+Return ONLY valid JSON in this shape:
+{{"document_type": "contract", "plan": ["task 1", "task 2", "task 3"]}}
+
+Document classification options:
 - "resume"
 - "contract"
 - "policy"
 - "report"
 - "other"
 
-Return ONLY a JSON object: {{"document_type": "category"}}
-
 Document:
-{document_text[:1000]}"""
+{document_text[:1500]}"""
 
     doc_type = "other"
-    try:
-        response = llm.generate(detection_prompt, json_mode=True)
-        result = json.loads(response)
-        doc_type = result.get("document_type", "other")
-    except:
-        pass
-
-    # Generate plan
-    if doc_type == "resume":
-        prompt = f"""Break this resume analysis into 3-5 subtasks. Return ONLY a JSON array of strings.
-Resume: {document_text[:1500]}"""
-    elif doc_type == "contract":
-        prompt = f"""Break this contract audit into 3-5 subtasks. Return ONLY a JSON array of strings.
-Contract: {document_text[:1500]}"""
-    elif doc_type == "policy":
-        prompt = f"""Break this policy review into 3-5 subtasks. Return ONLY a JSON array of strings.
-Policy: {document_text[:1500]}"""
-    else:
-        prompt = f"""Break this document analysis into 3-5 subtasks. Return ONLY a JSON array of strings.
-Document: {document_text[:1500]}"""
-
-    plan = []
+    plan = DEFAULT_PLAN
     try:
         response = llm.generate(prompt, json_mode=True)
-        plan = json.loads(response)
-        if not isinstance(plan, list):
-            plan = ["Summarize document", "Identify key points", "Provide recommendations"]
+        result = json.loads(response)
+        if isinstance(result, dict):
+            doc_type = result.get("document_type", "other")
+            candidate_plan = result.get("plan", DEFAULT_PLAN)
+            if isinstance(candidate_plan, list):
+                filtered_plan = [
+                    str(item).strip()
+                    for item in candidate_plan
+                    if str(item).strip()
+                ]
+                if filtered_plan:
+                    plan = filtered_plan[:5]
+        if doc_type not in {"resume", "contract", "policy", "report", "other"}:
+            doc_type = "other"
     except:
-        plan = ["Summarize document", "Identify key points", "Provide recommendations"]
+        doc_type = "other"
+        plan = DEFAULT_PLAN
 
     return {"plan": plan, "document_type": doc_type}

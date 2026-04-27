@@ -2,7 +2,8 @@ import os
 import uuid
 import logging
 import json
-from fastapi import FastAPI, UploadFile, File, Request
+from fastapi import FastAPI, UploadFile, File
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -35,19 +36,11 @@ async def home():
     return FileResponse("templates/index.html")
 
 
-class UploadResponse(BaseModel):
-    client_id: str
-    doc_id: str
-    message: str
-
-
-@app.post("/upload", response_model=UploadResponse)
-async def upload_document(file: UploadFile = File(...)):
+def _process_upload(file_name: str, content: bytes):
     client_id = str(uuid.uuid4())
     doc_id = str(uuid.uuid4())
 
-    content = await file.read()
-    file_path = f"/tmp/{file.filename}"
+    file_path = f"/tmp/{file_name}"
     with open(file_path, "wb") as f:
         f.write(content)
 
@@ -60,14 +53,49 @@ async def upload_document(file: UploadFile = File(...)):
     state_manager.save_state(client_id, {
         "document_text": text,
         "doc_id": doc_id,
-        "filename": file.filename,
+        "filename": file_name,
     })
 
     return UploadResponse(
         client_id=client_id,
         doc_id=doc_id,
-        message=f"✅ {file.filename} processed"
+        message=f"✅ {file_name} processed"
     )
+
+
+def _run_audit_for_client(client_id: str):
+    state = state_manager.get_state(client_id)
+    if not state:
+        return None
+
+    initial_state = {
+        "document_text": state["document_text"],
+        "doc_id": state["doc_id"],
+    }
+    config = {"recursion_limit": 100}
+    return compliance_graph.invoke(initial_state, config=config)
+
+
+def _run_critique(plan: list, context: list, draft_report: str):
+    from agent.nodes.critic import critic_node
+
+    return critic_node({
+        "plan": plan,
+        "retrieved_context": context,
+        "draft_report": draft_report,
+    })
+
+
+class UploadResponse(BaseModel):
+    client_id: str
+    doc_id: str
+    message: str
+
+
+@app.post("/upload", response_model=UploadResponse)
+async def upload_document(file: UploadFile = File(...)):
+    content = await file.read()
+    return await run_in_threadpool(_process_upload, file.filename, content)
 
 
 class AuditRequest(BaseModel):
@@ -76,16 +104,9 @@ class AuditRequest(BaseModel):
 
 @app.post("/audit")
 async def run_audit(request: AuditRequest):
-    state = state_manager.get_state(request.client_id)
-    if not state:
+    result = await run_in_threadpool(_run_audit_for_client, request.client_id)
+    if not result:
         return JSONResponse({"error": "Session not found"}, 404)
-
-    initial_state = {
-        "document_text": state["document_text"],
-        "doc_id": state["doc_id"],
-    }
-    config = {"recursion_limit": 100}
-    result = compliance_graph.invoke(initial_state, config=config)
 
     return JSONResponse({
         "draft_report": result.get("draft_report", ""),
@@ -102,13 +123,13 @@ class CritiqueRequest(BaseModel):
 
 @app.post("/critique")
 async def get_critique(request: CritiqueRequest):
-    from agent.nodes.critic import critic_node
     try:
-        result = critic_node({
-            "plan": request.plan,
-            "retrieved_context": request.context,
-            "draft_report": request.draft_report,
-        })
+        result = await run_in_threadpool(
+            _run_critique,
+            request.plan,
+            request.context,
+            request.draft_report,
+        )
         return JSONResponse({
             "passes_validation": result.get("passes_validation", True),
             "critique": result.get("critique", ""),

@@ -1,6 +1,8 @@
 import os
 import time
 import logging
+import base64
+import unicodedata
 from pinecone import Pinecone, ServerlessSpec
 
 logger = logging.getLogger(__name__)
@@ -31,13 +33,26 @@ class PineconeVectorStore:
                 time.sleep(2)
             logger.info(f"Index '{self.index_name}' created.")
 
+    def _encode_metadata_text(self, text: str) -> str:
+        normalized = unicodedata.normalize("NFC", text or "")
+        return base64.b64encode(normalized.encode("utf-8")).decode("ascii")
+
+    def _decode_metadata_text(self, metadata: dict) -> str:
+        encoded_text = metadata.get("text_b64")
+        if encoded_text:
+            return base64.b64decode(encoded_text).decode("utf-8")
+        return metadata.get("text", "")
+
     def upsert_document(self, doc_id: str, chunks: list, embeddings: list):
         records = []
         for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
             records.append({
                 "id": f"{doc_id}-{i}",
                 "values": emb.tolist(),
-                "metadata": {"text": chunk, "doc_id": doc_id}
+                "metadata": {
+                    "text_b64": self._encode_metadata_text(chunk),
+                    "doc_id": doc_id,
+                }
             })
         self.index.upsert(vectors=records)
 
@@ -49,4 +64,4 @@ class PineconeVectorStore:
             include_metadata=True,
             filter=filter_dict
         )
-        return [match["metadata"]["text"] for match in result["matches"]]
+        return [self._decode_metadata_text(match["metadata"]) for match in result["matches"]]
