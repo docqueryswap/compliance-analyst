@@ -66,33 +66,6 @@ def _recommendation_for_risk(risk: str) -> str:
     return f"Revise the clause-level wording for {risk_lower} so the obligation is balanced, operationally clear, and less vulnerable under applicable labor, privacy, or unfair-contract principles."
 
 
-def _adjust_confidence_score(confidence_score: int, critique: str, missing_risks: list, final_report: str) -> int:
-    adjusted = confidence_score
-    critique_lower = critique.lower()
-    report_lower = final_report.lower()
-
-    adjusted -= min(len(missing_risks) * 8, 24)
-
-    penalty_markers = [
-        "unsupported",
-        "hallucinated",
-        "contradiction",
-        "missing evidence",
-        "weak recommendation",
-        "omitted risk",
-    ]
-    adjusted -= sum(6 for marker in penalty_markers if marker in critique_lower)
-
-    if "## confidence score" not in report_lower:
-        adjusted -= 10
-    if "## recommended actions" not in report_lower:
-        adjusted -= 10
-    if "likely conflicts with" in report_lower or "may create risk under" in report_lower or "may be vulnerable to challenge under" in report_lower:
-        adjusted += 4
-
-    return max(0, min(adjusted, 100))
-
-
 def _inject_missing_risks(final_report: str, missing_risks: list) -> str:
     cleaned_risks = [str(item).strip() for item in missing_risks if str(item).strip()]
     if not cleaned_risks:
@@ -158,7 +131,12 @@ You MUST output ONLY a valid JSON object with exactly these five keys:
 - "passes_validation": true or false
 - "critique": a detailed critique explaining unsupported claims, missing evidence, weak recommendations, contradictions, or omitted risks
 - "final_report": the improved report as plain text
-- "confidence_score": an integer from 0 to 100 based on evidentiary support and report reliability
+- "confidence_score": an integer from 0 to 100 that reflects how much the final report can be trusted. Base this on:
+    - evidence grounding (how well conclusions are tied to retrieved context)
+    - source quality (are sources authoritative and relevant?)
+    - completeness (are all plan subtasks covered?)
+    - gaps (missing risks or unsupported claims reduce confidence)
+    - recommendation specificity (vague vs. concrete drafting fixes)
 - "missing_risks": an array of short strings for critical risks the draft missed
 
 Validation rules:
@@ -186,7 +164,12 @@ JSON:"""
 
     # Try up to 2 times
     for attempt in range(2):
-        response = llm.generate(prompt, json_mode=True)
+        response = llm.generate(
+            prompt,
+            json_mode=True,
+            max_tokens=3000,
+            use_reasoning=True
+        )
         logger.info(f"Critic raw response (attempt {attempt+1}, first 500 chars): {response[:500]}")
         result = _extract_json(response)
         if result:
@@ -221,8 +204,10 @@ JSON:"""
         confidence_score = int(confidence_score)
     except (TypeError, ValueError):
         confidence_score = 55
+    # Clamp to 0-100
+    confidence_score = max(0, min(100, confidence_score))
+
     final_report = _inject_missing_risks(final_report, missing_risks)
-    confidence_score = _adjust_confidence_score(confidence_score, critique, missing_risks, final_report)
 
     return {
         "passes_validation": passes,

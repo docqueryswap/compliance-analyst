@@ -18,6 +18,30 @@ function clearCritiqueSection() {
     }
 }
 
+// Extract a confidence score like "8/10", "confidence score of 8", etc.
+// Now handles intervening words like "The Confidence Score for this report is 8/10"
+function extractConfidenceFromDraft(draftText) {
+    if (!draftText) return null;
+    const patterns = [
+        // Match "Confidence Score ... 8/10" with any words in between
+        /confidence\s*score\b.*?(\d{1,2})\s*\/\s*10/i,
+        // "8/10 confidence score" (number first)
+        /(\d{1,2})\s*\/\s*10\s*confidence\s*score/i,
+        // "confidence score is 8" (without /10)
+        /confidence\s*score\b.*?(\d{1,2})\b/i,
+    ];
+    for (const regex of patterns) {
+        const match = draftText.match(regex);
+        if (match) {
+            const num = parseInt(match[1], 10);
+            if (num >= 0 && num <= 10) {
+                return num * 10; // convert to 0-100 scale
+            }
+        }
+    }
+    return null;
+}
+
 const fileInput = document.getElementById('fileInput');
 const uploadBtn = document.getElementById('uploadBtn');
 const fileName = document.getElementById('fileName');
@@ -72,20 +96,13 @@ auditBtn.addEventListener('click', async () => {
 
     resetCritiqueState();
     clearCritiqueSection();
-    reportContent.innerHTML = `
-        <p>⏳ Running compliance audit...</p>
-    `;
+    reportContent.innerHTML = `<p>⏳ Running compliance audit...</p>`;
 
     try {
-        // STEP 1: RUN AUDIT
         const auditRes = await fetch('/audit', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                client_id: clientId
-            })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ client_id: clientId })
         });
 
         const auditData = await auditRes.json();
@@ -101,26 +118,39 @@ auditBtn.addEventListener('click', async () => {
         latestContext = auditData.retrieved_context || [];
         critiqueBtn.disabled = false;
 
+        // Try to extract a draft-based confidence score
+        const draftConfidence = extractConfidenceFromDraft(draftReport);
+
+        // Display draft
         reportContent.innerHTML = `
             <h3>📄 Draft Report</h3>
-            <div style="white-space: pre-wrap; margin-bottom: 24px;">
-${draftReport}
-            </div>
+            <div style="white-space: pre-wrap; margin-bottom: 24px;">${draftReport}</div>
         `;
 
+        // If we found a draft confidence, show it immediately
+        if (draftConfidence !== null) {
+            const confColor = draftConfidence >= 70 ? '#1e7a1e' : draftConfidence >= 40 ? '#b85e00' : '#c62828';
+            const confDisplay = document.createElement('div');
+            confDisplay.innerHTML = `
+                <div style="margin-bottom: 18px;">
+                    <span style="background: ${confColor}; color: white; padding: 6px 14px; border-radius: 20px; font-weight: bold;">
+                        📊 Draft Confidence: ${draftConfidence}/100
+                    </span>
+                    <p style="margin-top: 10px; color: #666;">Self‑assessed by the report generator.</p>
+                </div>
+            `;
+            reportContent.appendChild(confDisplay);
+        }
+
     } catch (error) {
-        reportContent.innerHTML = `
-            <p>❌ Failed to run compliance audit.</p>
-        `;
+        reportContent.innerHTML = `<p>❌ Failed to run compliance audit.</p>`;
         resetCritiqueState();
         console.error(error);
     }
 });
 
 critiqueBtn.addEventListener('click', async () => {
-    if (!latestDraftReport) {
-        return;
-    }
+    if (!latestDraftReport) return;
 
     critiqueBtn.disabled = true;
     clearCritiqueSection();
@@ -134,9 +164,7 @@ critiqueBtn.addEventListener('click', async () => {
     try {
         const critiqueRes = await fetch('/critique?source=button_click', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 draft_report: latestDraftReport,
                 plan: latestPlan,
@@ -150,20 +178,21 @@ critiqueBtn.addEventListener('click', async () => {
         const critique = critiqueData.critique || 'No critique feedback provided.';
         const finalReport = critiqueData.final_report || 'No improved final report generated.';
 
-        const validationText = passed
-            ? '✅ Passed Validation'
-            : '⚠️ Needs Improvement';
+        // Determine which confidence score to show
+        let confidenceScore = critiqueData.confidence_score;
+        const isFallback = (confidenceScore === 55 && critique.startsWith('The report is structured'));
+        if (isFallback || typeof confidenceScore !== 'number') {
+            const draftConf = extractConfidenceFromDraft(latestDraftReport);
+            confidenceScore = draftConf !== null ? draftConf : 55;
+        }
 
-        const validationScore = passed
-            ? '94%'
-            : '76%';
-
-        const validationColor = passed
-            ? '#1e7a1e'
-            : '#b85e00';
+        const validationText = passed ? '✅ Passed Validation' : '⚠️ Needs Improvement';
+        const validationScore = passed ? '94%' : '76%';
+        const validationColor = passed ? '#1e7a1e' : '#b85e00';
+        const confidenceColor = confidenceScore >= 70 ? '#1e7a1e' : confidenceScore >= 40 ? '#b85e00' : '#c62828';
 
         document.getElementById('critiqueSection').innerHTML = `
-            <div style="margin-bottom: 18px;">
+            <div style="margin-bottom: 18px; display: flex; gap: 16px; flex-wrap: wrap;">
                 <span style="
                     background: ${validationColor};
                     color: white;
@@ -173,25 +202,26 @@ critiqueBtn.addEventListener('click', async () => {
                 ">
                     🛡️ Validation: ${validationScore}
                 </span>
-                <p style="margin-top: 10px;">
-                    <strong>Status:</strong> ${validationText}
-                </p>
+                <span style="
+                    background: ${confidenceColor};
+                    color: white;
+                    padding: 6px 14px;
+                    border-radius: 20px;
+                    font-weight: bold;
+                ">
+                    📊 Confidence: ${confidenceScore}/100
+                </span>
             </div>
-
+            <p style="margin-top: 10px;">
+                <strong>Status:</strong> ${validationText}
+            </p>
             <h3>🛡️ Critique Feedback</h3>
-            <div style="white-space: pre-wrap; margin-bottom: 24px;">
-${critique}
-            </div>
-
+            <div style="white-space: pre-wrap; margin-bottom: 24px;">${critique}</div>
             <h3>📑 Improved Final Report</h3>
-            <div style="white-space: pre-wrap;">
-${finalReport}
-            </div>
+            <div style="white-space: pre-wrap;">${finalReport}</div>
         `;
     } catch (error) {
-        document.getElementById('critiqueSection').innerHTML = `
-            <p>❌ Failed to run critique.</p>
-        `;
+        document.getElementById('critiqueSection').innerHTML = `<p>❌ Failed to run critique.</p>`;
         console.error(error);
     } finally {
         critiqueBtn.disabled = false;
