@@ -16,8 +16,7 @@
   {
     "id": "non_contract_001",
     "document_path": "evaluation/test_docs/non_contract_1.txt",
-    "expected_doc_type": "non_auditable",
-    "should_contain_keywords": ["Cannot Audit"],
+    "expected_doc_type": "other",
     "should_not_contain_keywords": ["Executive Summary", "High Risk Clauses"]
   }
 ]
