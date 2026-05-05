@@ -1,0 +1,6 @@
+City,Crime Type,Crime Description,Convict Name
+Hong Kong,Theft,Dishonest appropriation of another person's property,Ng Tsz-Ho
+Hong Kong,Robbery,Theft committed by using force or threat,Ho Man-Ching
+Hong Kong,Burglary,Unlawful entry into a building to commit theft,Lau Chun-Hei
+Hong Kong,Assault,Intentional use of unlawful force against another person,Yip Kar-Lok
+Hong Kong,Drug Offense,Illegal possession of controlled substances,Leung Kai-Wai

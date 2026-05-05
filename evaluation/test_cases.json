@@ -1,15 +1,23 @@
-
 [
   {
-    "id": "contract_001",
-    "document_path": "evaluation/test_docs/contract_sample.txt",
-    "expected_doc_type": "contract",
-    "should_contain_keywords": ["Executive Summary", "Key Findings", "Recommendations"]
+    "id": "consumer_loan_001",
+    "document_path": "evaluation/test_docs/consumer_loan_1.txt",
+    "expected_doc_type": "consumer_loan",
+    "should_contain_keywords": ["usury", "collateral", "SSN", "repossession", "UCC"],
+    "should_not_contain_keywords": ["employment", "employee", "working hours", "leave entitlement"]
   },
   {
-    "id": "resume_001",
-    "document_path": "evaluation/test_docs/resume_sample.txt",
-    "expected_doc_type": "resume",
-    "should_contain_keywords": ["skills", "experience"]
+    "id": "vendor_agreement_001",
+    "document_path": "evaluation/test_docs/vendor_agreement_1.txt",
+    "expected_doc_type": "service_agreement",
+    "should_contain_keywords": ["scope of work", "termination", "governing law", "blank"],
+    "should_not_contain_keywords": ["usury", "collateral", "employee", "working hours"]
+  },
+  {
+    "id": "non_contract_001",
+    "document_path": "evaluation/test_docs/non_contract_1.txt",
+    "expected_doc_type": "non_auditable",
+    "should_contain_keywords": ["Cannot Audit"],
+    "should_not_contain_keywords": ["Executive Summary", "High Risk Clauses"]
   }
 ]
