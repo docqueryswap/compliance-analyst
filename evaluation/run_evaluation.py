@@ -6,7 +6,6 @@ import sys
 from datetime import datetime, timezone
 from typing import Dict, Any
 
-# Add parent directory to path so we can import from core
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 SPACE_URL = os.getenv("SPACE_URL", "https://docqueryswap-compliance-analyst.hf.space")
@@ -18,7 +17,6 @@ REPORT_OUTPUT = "evaluation/evaluation_report.json"
 
 
 def upload_document(file_path: str) -> str:
-    """Upload a document to the API and return client_id."""
     with open(file_path, "rb") as f:
         files = {"file": f}
         response = requests.post(UPLOAD_ENDPOINT, files=files, timeout=60)
@@ -27,29 +25,20 @@ def upload_document(file_path: str) -> str:
 
 
 def run_audit(client_id: str) -> Dict[str, Any]:
-    """Run the compliance audit and return the result."""
     response = requests.post(AUDIT_ENDPOINT, json={"client_id": client_id}, timeout=120)
     response.raise_for_status()
     return response.json()
 
 
 def infer_document_type(audit: Dict[str, Any]) -> str:
-    """
-    Infer document type from the audit result.
-    First checks for explicit document_type field, then falls back to
-    keyword analysis of the draft report.
-    """
-    # Check for explicit document_type from our updated planner
     if "document_type" in audit:
         return audit["document_type"]
     
     draft = audit.get("draft_report", "").lower()
     
-    # Check for non-auditable rejection
     if "cannot audit" in draft:
         return "non_auditable"
     
-    # Keyword-based fallback (matches our new classifier types)
     type_keywords = {
         "consumer_loan": ["lender", "borrower", "usury", "collateral", "repossession"],
         "employment": ["employee", "employer", "working hours", "leave", "overtime"],
@@ -72,7 +61,6 @@ def infer_document_type(audit: Dict[str, Any]) -> str:
 
 
 def evaluate_case(case: Dict[str, Any]) -> Dict[str, Any]:
-    """Evaluate a single test case."""
     start = time.time()
     result = {
         "id": case["id"],
@@ -81,23 +69,20 @@ def evaluate_case(case: Dict[str, Any]) -> Dict[str, Any]:
         "latency_sec": 0,
         "failure_reason": None,
         "doc_type_match": False,
+        "detected_type": None,
         "keywords_present": [],
-        "keywords_absent": [],
         "unwanted_keywords_found": [],
     }
     
     try:
-        # Upload and audit
         client_id = upload_document(case["document_path"])
         audit = run_audit(client_id)
         draft = audit.get("draft_report", "")
         
-        # Check document type
         detected_type = infer_document_type(audit)
-        result["doc_type_match"] = (detected_type == case["expected_doc_type"])
         result["detected_type"] = detected_type
+        result["doc_type_match"] = (detected_type == case["expected_doc_type"])
         
-        # Check required keywords
         keywords_found = [
             kw for kw in case.get("should_contain_keywords", [])
             if kw.lower() in draft.lower()
@@ -105,7 +90,6 @@ def evaluate_case(case: Dict[str, Any]) -> Dict[str, Any]:
         result["keywords_present"] = keywords_found
         all_required = len(keywords_found) == len(case.get("should_contain_keywords", []))
         
-        # Check prohibited keywords (cross-contamination)
         unwanted_found = [
             kw for kw in case.get("should_not_contain_keywords", [])
             if kw.lower() in draft.lower()
@@ -143,13 +127,14 @@ def main():
     
     for r in results:
         status = "✅" if r["success"] else "❌"
+        expected = r.get("expected_type", case.get("expected_doc_type", "N/A"))
         print(f"{status} {r['id']}: type={r.get('detected_type', 'N/A')} "
-              f"(expected {case.get('expected_doc_type', 'N/A')}) "
+              f"(expected {expected}) "
               f"latency={r['latency_sec']}s")
         if not r["success"]:
             if not r.get("doc_type_match"):
                 print(f"   ⚠️ Type mismatch: got '{r.get('detected_type')}', "
-                      f"expected '{case.get('expected_doc_type')}'")
+                      f"expected '{expected}'")
             if r.get("unwanted_keywords_found"):
                 print(f"   ⚠️ Cross-contamination: found {r['unwanted_keywords_found']}")
             if r.get("failure_reason"):
@@ -170,7 +155,6 @@ def main():
     
     print(f"\n📁 Report saved to {REPORT_OUTPUT}")
     
-    # Exit with non-zero if any test failed (for CI/CD)
     if successes < total:
         sys.exit(1)
 
