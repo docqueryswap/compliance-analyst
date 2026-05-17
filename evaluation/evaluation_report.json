@@ -1,0 +1,40 @@
+{
+  "timestamp": "2026-05-17T11:18:34.352711+00:00",
+  "summary": {
+    "accuracy": 1.0,
+    "total": 3,
+    "successes": 3
+  },
+  "results": [
+    {
+      "id": "consumer_loan_001",
+      "timestamp": "2026-05-17T11:18:34.292021+00:00",
+      "success": true,
+      "expected_type": "consumer_loan",
+      "detected_type": "consumer_loan",
+      "doc_type_match": true,
+      "issues_found": 2,
+      "failure_reason": null
+    },
+    {
+      "id": "vendor_agreement_001",
+      "timestamp": "2026-05-17T11:18:34.335894+00:00",
+      "success": true,
+      "expected_type": "service_agreement",
+      "detected_type": "service_agreement",
+      "doc_type_match": true,
+      "issues_found": 1,
+      "failure_reason": null
+    },
+    {
+      "id": "non_contract_001",
+      "timestamp": "2026-05-17T11:18:34.346608+00:00",
+      "success": true,
+      "expected_type": "other",
+      "detected_type": "other",
+      "doc_type_match": true,
+      "issues_found": 1,
+      "failure_reason": null
+    }
+  ]
+}

@@ -22,8 +22,6 @@ class TextProcessor:
             ],
         )
 
-        self.embedder = get_embedder()
-
     def split_text(self, text: str):
         normalized = "\n".join(
             line.strip() for line in text.splitlines()
@@ -38,4 +36,4 @@ class TextProcessor:
         ]
 
     def generate_embeddings(self, chunks):
-        return self.embedder.encode(chunks)
+        return get_embedder().encode(chunks)

@@ -5,13 +5,16 @@ from agent.nodes.retriever import retriever_node
 from agent.nodes.executor import executor_node
 
 
-class ComplianceState(TypedDict):
+class ComplianceState(TypedDict, total=False):
     document_text: str
     doc_id: str
+    document_chunks: List[str]
     document_type: str
     plan: List[str]
     retrieved_context: List[str]
     draft_report: str
+    pre_detected_issues: List[dict]
+    error: str
 
 
 def build_compliance_graph():

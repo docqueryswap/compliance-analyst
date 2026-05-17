@@ -4,34 +4,100 @@ detects structural issues, and generates a type‑specific compliance audit plan
 """
 import json
 import re
+import logging
 from core.llm_client import LLMClient
-from core.classifier import classify_document, get_party_labels, detect_document_issues, ContractType
+from core.classifier import (
+    classify_document,
+    compute_auditability_score,
+    get_party_labels,
+    detect_document_issues,
+    ContractType,
+    NON_AUDITABLE,
+)
 
-llm = LLMClient()
+logger = logging.getLogger(__name__)
+
+llm = None
 
 
-def _is_auditable_document(text: str, doc_type: ContractType) -> bool:
+def _get_llm():
+    global llm
+    if llm is None:
+        llm = LLMClient()
+    return llm
+
+
+def planner_node(state: dict) -> dict:
     """
-    Check if the document is actually a contract, policy, or legal agreement.
-    Prevents hallucination on CSVs, spreadsheets, or non-legal text.
+    Orchestrator function called by LangGraph.
+    Classifies the document, validates it via ensemble score, generates type‑specific plan.
     """
-    # If classifier found a specific contract type, trust it
-    if doc_type != ContractType.OTHER:
-        return True
-    
-    # For "other" — check for contract-like structure
-    contract_indicators = [
-        r"(agreement|contract|terms\s+and\s+conditions|parties|clause|section|article)",
-        r"(shall|must|will|agrees?\s+to|obligations?\s+of)",
-        r"(termination|breach|indemnify|warranty|representation)",
-        r"(governing\s+law|jurisdiction|arbitration|dispute\s+resolution)",
-        r"(hereinafter|hereto|whereas|hereby|aforesaid)",
-    ]
-    
-    text_lower = text.lower()
-    matches = sum(1 for pattern in contract_indicators if re.search(pattern, text_lower))
-    
-    return matches >= 2  # At least 2 contract-like patterns required
+    document_text = state.get("document_text", "")
+
+    # ── DEBUG: log document info ──
+    #logger.info(f"Planner received document | length={len(document_text)} | first_200_chars='{document_text[:200]}'")
+
+    # ── Guard: ensemble auditability score (no API calls) ──
+    score = compute_auditability_score(document_text)
+    if score < 0.35:
+        logger.warning(f"Document rejected | score={score:.3f} < threshold=0.35")
+        return {
+            "plan": [],
+            "document_type": "non_auditable",
+            "error": (
+                "⚠️ This document does not appear to be a contract, policy, or legal agreement. "
+                "The file may be a CSV, spreadsheet, or data export. "
+                "Please upload a valid contract, agreement, or policy document for compliance auditing."
+            ),
+        }
+
+    logger.info(f"Document passed guard | score={score:.3f}")
+
+    # Step 1: Classify using deterministic rules (for type‑specific prompting)
+    doc_type = classify_document(document_text)
+
+    # Safety net
+    if doc_type == NON_AUDITABLE:
+        return {
+            "plan": [],
+            "document_type": "non_auditable",
+            "error": (
+                "⚠️ This document does not appear to be a contract, policy, or legal agreement. "
+                "Please upload a valid contract."
+            ),
+        }
+
+    parties = get_party_labels(doc_type)
+
+    # Step 2: Pre-detect structural issues (blank fields, missing sigs, PII)
+    issues = detect_document_issues(document_text)
+
+    # Step 3: Build type‑specific prompt
+    prompt = build_plan_prompt(document_text, doc_type, parties, issues)
+
+    # Step 4: Get plan from LLM
+    plan = []
+    try:
+        response = _get_llm().generate(prompt, json_mode=True, use_reasoning=False)
+        result = json.loads(response)
+        if isinstance(result, dict) and isinstance(result.get("plan"), list):
+            plan = [
+                str(item).strip()
+                for item in result["plan"]
+                if str(item).strip()
+            ][:6]
+    except Exception as e:
+        logger.error(f"LLM plan generation failed: {e}")
+
+    # Fallback if LLM fails
+    if not plan:
+        plan = _get_fallback_plan(doc_type, parties)
+
+    return {
+        "plan": plan,
+        "document_type": doc_type.value,
+        "pre_detected_issues": issues,
+    }
 
 
 def build_plan_prompt(document_text: str, doc_type: ContractType, parties: dict, issues: list) -> str:
@@ -39,14 +105,12 @@ def build_plan_prompt(document_text: str, doc_type: ContractType, parties: dict,
     Build a prompt that forces the LLM to generate a plan specific to the
     contract type, never falling back to generic/employment language.
     """
-    
-    # Include pre-detected issues in the prompt
     issues_str = ""
     if issues:
         issues_str = "\nPre-detected structural issues (MUST be included in plan):\n"
         for issue in issues:
             issues_str += f"- [{issue['severity']}] {issue['detail']}\n"
-    
+
     type_instructions = {
         ContractType.CONSUMER_LOAN: """This is a consumer loan agreement between a {party_b} and a {party_a}.
 Generate a compliance audit plan focused ONLY on lending law:
@@ -56,7 +120,6 @@ Generate a compliance audit plan focused ONLY on lending law:
 - Validate repossession and default provisions comply with UCC 9-611 notice requirements
 - Assess prepayment penalties, late fees, and acceleration clauses
 - Verify Truth in Lending Act disclosures (APR, finance charge, payment schedule)""",
-        
         ContractType.EMPLOYMENT: """This is an employment agreement between an {party_a} and an {party_b}.
 Generate a compliance audit plan focused ONLY on employment law:
 - Check working hours, overtime, and rest break compliance (FLSA)
@@ -65,7 +128,6 @@ Generate a compliance audit plan focused ONLY on employment law:
 - Review employee liability and indemnification
 - Check non‑compete and confidentiality scope
 - Verify dispute resolution and governing law""",
-        
         ContractType.NDA: """This is a non‑disclosure agreement between a {party_a} and {party_b}.
 Generate a compliance audit plan focused ONLY on confidentiality:
 - Verify definition of confidential information is clear
@@ -73,21 +135,18 @@ Generate a compliance audit plan focused ONLY on confidentiality:
 - Assess exclusions from confidentiality
 - Review return/destruction of confidential materials
 - Check for non‑circumvention or non‑compete overreach""",
-        
         ContractType.STUDENT_LOAN: """This is a student loan agreement between a {party_b} and a {party_a}.
 Generate a compliance audit plan focused ONLY on educational lending:
 - Verify Truth in Lending Act and Higher Education Act compliance
 - Check for required disclosures (APR, deferment, forbearance)
 - Assess prepayment and consolidation options
 - Verify in‑school deferment provisions""",
-        
         ContractType.LEASE: """This is a lease agreement between a {party_a} and a {party_b}.
 Generate a compliance audit plan focused ONLY on property leasing:
 - Check security deposit handling and return timeline
 - Verify maintenance and repair obligations
 - Assess eviction and default procedures
 - Review rent increase and renewal terms""",
-        
         ContractType.SERVICE_AGREEMENT: """This is a service/vendor agreement between a {party_a} and a {party_b}.
 Generate a compliance audit plan focused ONLY on service delivery:
 - Verify scope of work and deliverables are defined
@@ -97,7 +156,6 @@ Generate a compliance audit plan focused ONLY on service delivery:
 - Verify independent contractor classification (if applicable)
 - Check IP ownership and licensing terms
 - Verify insurance requirements are specified""",
-        
         ContractType.OTHER: """This is a general contract.
 Generate a compliance audit plan focusing on universal contract risks:
 - Check for ambiguous or undefined terms
@@ -106,77 +164,21 @@ Generate a compliance audit plan focusing on universal contract risks:
 - Review dispute resolution and governing law
 - Flag missing signatures, dates, or parties""",
     }
-    
-    instruction = type_instructions.get(
-        doc_type,
-        type_instructions[ContractType.OTHER]
-    ).format(**parties)
-    
+
+    instruction = type_instructions.get(doc_type, type_instructions[ContractType.OTHER]).format(**parties)
+
     return f"""{instruction}
 {issues_str}
 Document excerpt:
 {document_text[:2000]}
-
 Return ONLY valid JSON:
 {{"plan": ["task 1", "task 2", "task 3", "task 4", "task 5", "task 6"]}}
-
 CRITICAL RULES:
 - Every task must be about compliance, legal risk, or enforceability for THIS specific contract type
 - Do NOT include tasks about employment, labor law, or employee rights unless this IS an employment contract
 - Do NOT include generic tasks like "Summarize document" or "Identify key points"
 - Each task should mention a specific clause type or legal standard to verify
 - If pre-detected structural issues are listed above, include them in the plan"""
-
-
-def planner_node(state: dict) -> dict:
-    """
-    Orchestrator function called by LangGraph.
-    Classifies the document, validates it, generates type‑specific plan.
-    """
-    document_text = state.get("document_text", "")
-    
-    # Step 1: Classify using deterministic rules
-    doc_type = classify_document(document_text)
-    
-    # Step 2: VALIDATION GATE — reject non-auditable documents
-    if not _is_auditable_document(document_text, doc_type):
-        return {
-            "plan": [],
-            "document_type": "non_auditable",
-            "error": "⚠️ This document does not appear to be a contract, policy, or legal agreement. The file may be a CSV, spreadsheet, or data export. Please upload a valid contract, agreement, or policy document for compliance auditing."
-        }
-    
-    parties = get_party_labels(doc_type)
-    
-    # Step 3: Pre-detect structural issues (blank fields, missing sigs, PII)
-    issues = detect_document_issues(document_text)
-    
-    # Step 4: Build type‑specific prompt
-    prompt = build_plan_prompt(document_text, doc_type, parties, issues)
-    
-    # Step 5: Get plan from LLM
-    plan = []
-    try:
-        response = llm.generate(prompt, json_mode=True)
-        result = json.loads(response)
-        if isinstance(result, dict) and isinstance(result.get("plan"), list):
-            plan = [
-                str(item).strip()
-                for item in result["plan"]
-                if str(item).strip()
-            ][:6]
-    except Exception:
-        pass
-    
-    # Fallback: if LLM fails, use a type‑appropriate default
-    if not plan:
-        plan = _get_fallback_plan(doc_type, parties)
-    
-    return {
-        "plan": plan,
-        "document_type": doc_type.value,
-        "pre_detected_issues": issues,
-    }
 
 
 def _get_fallback_plan(doc_type: ContractType, parties: dict) -> list:

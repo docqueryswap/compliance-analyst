@@ -3,11 +3,13 @@ let uploadedFileName = '';
 let latestDraftReport = '';
 let latestPlan = [];
 let latestContext = [];
+let latestDocumentType = 'other';
 
 function resetCritiqueState() {
     latestDraftReport = '';
     latestPlan = [];
     latestContext = [];
+    latestDocumentType = 'other';
     critiqueBtn.disabled = true;
 }
 
@@ -18,28 +20,88 @@ function clearCritiqueSection() {
     }
 }
 
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+async function parseJsonResponse(response, fallbackMessage) {
+    try {
+        return await response.json();
+    } catch (error) {
+        return { error: fallbackMessage };
+    }
+}
+
+function safeArray(value) {
+    return Array.isArray(value) ? value : [];
+}
+
+function hasActionableCritique(critiqueText) {
+    const critique = String(critiqueText || '').toLowerCase();
+    return Boolean(
+        critique &&
+        critique !== 'no critique feedback provided.' &&
+        !critique.includes('no critical errors found') &&
+        !critique.includes('source-grounded verification')
+    );
+}
+
 // Extract a confidence score like "8/10", "confidence score of 8", etc.
-// Now handles intervening words like "The Confidence Score for this report is 8/10"
 function extractConfidenceFromDraft(draftText) {
     if (!draftText) return null;
     const patterns = [
-        // Match "Confidence Score ... 8/10" with any words in between
         /confidence\s*score\b.*?(\d{1,2})\s*\/\s*10/i,
-        // "8/10 confidence score" (number first)
         /(\d{1,2})\s*\/\s*10\s*confidence\s*score/i,
-        // "confidence score is 8" (without /10)
         /confidence\s*score\b.*?(\d{1,2})\b/i,
     ];
     for (const regex of patterns) {
         const match = draftText.match(regex);
         if (match) {
             const num = parseInt(match[1], 10);
-            if (num >= 0 && num <= 10) {
-                return num * 10; // convert to 0-100 scale
+            if (/\/\s*10/.test(match[0]) && num >= 0 && num <= 10) {
+                return num * 10;
+            }
+            if (num >= 0 && num <= 100) {
+                return num;
             }
         }
     }
     return null;
+}
+
+// Generate dynamic verdict banner based on Critic result
+function getVerdictBanner(result) {
+    const safeResult = result || {};
+    const numericConfidence = Number(safeResult.confidence_score);
+    const confidenceScore = Number.isFinite(numericConfidence) ? numericConfidence : 55;
+    const passed = safeResult.passes_validation === true;
+    const critique = String(safeResult.critique || '');
+    const hasCritique = hasActionableCritique(critique);
+    const isFallback = safeResult._fallback_triggered === true;
+
+    let banner = '';
+    let confidenceNote = '';
+
+    if (isFallback) {
+        banner = `⚠️ Critique Unavailable — Report reflects initial draft only. Human review required.`;
+        confidenceNote = `📊 Confidence: ${confidenceScore}/100`;
+    } else if (passed && !hasCritique) {
+        banner = `✅ Passed Validation — No errors found. Report is consistent with source document.`;
+        confidenceNote = `📊 Confidence: ${confidenceScore}/100 — ${confidenceScore < 60 ? 'Moderate due to incomplete document sections.' : 'Strong evidentiary support.'}`;
+    } else if (passed && hasCritique) {
+        banner = `✅ Passed Validation — Minor issues noted. See feedback below.`;
+        confidenceNote = `📊 Confidence: ${confidenceScore}/100`;
+    } else {
+        banner = `⚠️ Needs Improvement — Errors found. Report revised based on feedback.`;
+        confidenceNote = `📊 Confidence: ${confidenceScore}/100`;
+    }
+
+    return { banner, confidenceNote };
 }
 
 const fileInput = document.getElementById('fileInput');
@@ -70,7 +132,11 @@ fileInput.addEventListener('change', async (e) => {
             body: formData
         });
 
-        const data = await res.json();
+        const data = await parseJsonResponse(res, 'Upload response was not valid JSON.');
+
+        if (!res.ok) {
+            throw new Error(data.error || 'Upload failed.');
+        }
 
         if (data.error) {
             uploadStatus.textContent = `❌ ${data.error}`;
@@ -84,7 +150,7 @@ fileInput.addEventListener('change', async (e) => {
         auditBtn.disabled = false;
 
     } catch (error) {
-        uploadStatus.textContent = '❌ Upload failed.';
+        uploadStatus.textContent = `❌ ${error.message || 'Upload failed.'}`;
     }
 });
 
@@ -105,29 +171,31 @@ auditBtn.addEventListener('click', async () => {
             body: JSON.stringify({ client_id: clientId })
         });
 
-        const auditData = await auditRes.json();
+        const auditData = await parseJsonResponse(auditRes, 'Audit response was not valid JSON.');
+
+        if (!auditRes.ok) {
+            throw new Error(auditData.error || 'Audit request failed.');
+        }
 
         if (auditData.error) {
-            reportContent.innerHTML = `<p>❌ ${auditData.error}</p>`;
+            reportContent.innerHTML = `<p>❌ ${escapeHtml(auditData.error)}</p>`;
             return;
         }
 
         const draftReport = auditData.draft_report || 'No draft report generated.';
         latestDraftReport = draftReport;
-        latestPlan = auditData.plan || [];
-        latestContext = auditData.retrieved_context || [];
+        latestPlan = safeArray(auditData.plan);
+        latestContext = safeArray(auditData.retrieved_context);
+        latestDocumentType = auditData.document_type || 'other';
         critiqueBtn.disabled = false;
 
-        // Try to extract a draft-based confidence score
         const draftConfidence = extractConfidenceFromDraft(draftReport);
 
-        // Display draft
         reportContent.innerHTML = `
             <h3>📄 Draft Report</h3>
-            <div style="white-space: pre-wrap; margin-bottom: 24px;">${draftReport}</div>
+            <div style="white-space: pre-wrap; margin-bottom: 24px;">${escapeHtml(draftReport)}</div>
         `;
 
-        // If we found a draft confidence, show it immediately
         if (draftConfidence !== null) {
             const confColor = draftConfidence >= 70 ? '#1e7a1e' : draftConfidence >= 40 ? '#b85e00' : '#c62828';
             const confDisplay = document.createElement('div');
@@ -143,7 +211,7 @@ auditBtn.addEventListener('click', async () => {
         }
 
     } catch (error) {
-        reportContent.innerHTML = `<p>❌ Failed to run compliance audit.</p>`;
+        reportContent.innerHTML = `<p>❌ ${escapeHtml(error.message || 'Failed to run compliance audit.')}</p>`;
         resetCritiqueState();
         console.error(error);
     }
@@ -168,40 +236,74 @@ critiqueBtn.addEventListener('click', async () => {
             body: JSON.stringify({
                 draft_report: latestDraftReport,
                 plan: latestPlan,
-                context: latestContext
+                context: latestContext,
+                document_type: latestDocumentType
             })
         });
 
-        const critiqueData = await critiqueRes.json();
+        let critiqueData = null;
+        try {
+            critiqueData = await critiqueRes.json();
+        } catch (parseError) {
+            throw new Error('Critique response was not valid JSON.');
+        }
+
+        if (!critiqueRes.ok) {
+            throw new Error(critiqueData?.error || 'Critique request failed.');
+        }
+
+        if (!critiqueData || typeof critiqueData !== 'object' || Array.isArray(critiqueData)) {
+            throw new Error('Critique response was empty.');
+        }
+
+        if (critiqueData.error) {
+            throw new Error(critiqueData.error);
+        }
 
         const passed = critiqueData.passes_validation === true;
-        const critique = critiqueData.critique || 'No critique feedback provided.';
-        const finalReport = critiqueData.final_report || 'No improved final report generated.';
+        const critique = String(critiqueData.critique || 'No critique feedback provided.');
+        const finalReport = String(critiqueData.final_report || latestDraftReport || 'No final report generated.');
 
-        // Determine which confidence score to show
-        let confidenceScore = critiqueData.confidence_score;
-        const isFallback = (confidenceScore === 55 && critique.startsWith('The report is structured'));
-        if (isFallback || typeof confidenceScore !== 'number') {
+        let confidenceScore = Number(critiqueData.confidence_score);
+        const fallbackCritiqueMarkers = [
+            'source-grounded verification',
+            'too brief for a reliable compliance assessment',
+            'stricter validation of evidence'
+        ];
+        const critiqueLower = critique.toLowerCase();
+        const isFallback = critiqueData._fallback_triggered === true ||
+            fallbackCritiqueMarkers.some(marker => critiqueLower.includes(marker));
+        if (isFallback || !Number.isFinite(confidenceScore)) {
             const draftConf = extractConfidenceFromDraft(latestDraftReport);
             confidenceScore = draftConf !== null ? draftConf : 55;
         }
+        confidenceScore = Math.max(0, Math.min(100, confidenceScore));
 
-        const validationText = passed ? '✅ Passed Validation' : '⚠️ Needs Improvement';
-        const validationScore = passed ? '94%' : '76%';
-        const validationColor = passed ? '#1e7a1e' : '#b85e00';
+        const hasCritique = hasActionableCritique(critique);
+
+        // Generate dynamic banner
+        const { banner, confidenceNote } = getVerdictBanner({
+            passes_validation: passed,
+            critique: critique,
+            confidence_score: confidenceScore,
+            _fallback_triggered: isFallback
+        });
+
+        const bannerColor = isFallback ? '#b85e00' : passed ? '#1e7a1e' : '#b85e00';
         const confidenceColor = confidenceScore >= 70 ? '#1e7a1e' : confidenceScore >= 40 ? '#b85e00' : '#c62828';
+        const finalReportLabel = isFallback
+            ? '📑 Draft Report (Critique Unavailable)'
+            : passed
+                ? '📑 Validated Final Report'
+                : '📑 Improved Final Report';
+        const critiqueSection = document.getElementById('critiqueSection');
+        if (!critiqueSection) return;
 
-        document.getElementById('critiqueSection').innerHTML = `
+        critiqueSection.innerHTML = `
+            <div style="margin-bottom: 18px; background: ${bannerColor}; color: white; padding: 12px 18px; border-radius: 8px; font-weight: bold;">
+                ${banner}
+            </div>
             <div style="margin-bottom: 18px; display: flex; gap: 16px; flex-wrap: wrap;">
-                <span style="
-                    background: ${validationColor};
-                    color: white;
-                    padding: 6px 14px;
-                    border-radius: 20px;
-                    font-weight: bold;
-                ">
-                    🛡️ Validation: ${validationScore}
-                </span>
                 <span style="
                     background: ${confidenceColor};
                     color: white;
@@ -209,19 +311,21 @@ critiqueBtn.addEventListener('click', async () => {
                     border-radius: 20px;
                     font-weight: bold;
                 ">
-                    📊 Confidence: ${confidenceScore}/100
+                    ${confidenceNote}
                 </span>
             </div>
-            <p style="margin-top: 10px;">
-                <strong>Status:</strong> ${validationText}
-            </p>
-            <h3>🛡️ Critique Feedback</h3>
-            <div style="white-space: pre-wrap; margin-bottom: 24px;">${critique}</div>
-            <h3>📑 Improved Final Report</h3>
-            <div style="white-space: pre-wrap;">${finalReport}</div>
+            ${hasCritique ? `
+                <h3>🛡️ Critique Feedback</h3>
+                <div style="white-space: pre-wrap; margin-bottom: 24px;">${escapeHtml(critique)}</div>
+            ` : ''}
+            <h3>${finalReportLabel}</h3>
+            <div style="white-space: pre-wrap;">${escapeHtml(finalReport)}</div>
         `;
     } catch (error) {
-        document.getElementById('critiqueSection').innerHTML = `<p>❌ Failed to run critique.</p>`;
+        const critiqueSection = document.getElementById('critiqueSection');
+        if (critiqueSection) {
+            critiqueSection.innerHTML = `<p>❌ ${escapeHtml(error.message || 'Failed to run critique.')}</p>`;
+        }
         console.error(error);
     } finally {
         critiqueBtn.disabled = false;

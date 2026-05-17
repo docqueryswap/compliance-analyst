@@ -2,10 +2,34 @@ from core.vector_store import PineconeVectorStore
 from core.web_search import WebSearchClient
 from core.embeddings import get_embedder
 import re
+import logging
 
-vector_db = PineconeVectorStore()
-web_search = WebSearchClient()
-embedder = get_embedder()
+logger = logging.getLogger(__name__)
+
+vector_db = None
+web_search = None
+embedder = None
+
+
+def _get_vector_db():
+    global vector_db
+    if vector_db is None:
+        vector_db = PineconeVectorStore()
+    return vector_db
+
+
+def _get_web_search():
+    global web_search
+    if web_search is None:
+        web_search = WebSearchClient()
+    return web_search
+
+
+def _get_embedder():
+    global embedder
+    if embedder is None:
+        embedder = get_embedder()
+    return embedder
 
 
 # Compliance terms now organized by domain to prevent cross-contamination
@@ -151,34 +175,59 @@ def _build_web_query(task: str, doc_type: str) -> str:
     return f"{task} {domain_context} compliance legal requirements"
 
 
+def _fallback_context_from_document(document_text: str, plan: list, doc_type: str, limit: int = 6, chunks: list = None) -> list:
+    chunks = [
+        str(chunk).strip()
+        for chunk in (chunks or [])
+        if str(chunk).strip()
+    ] or [
+        chunk.strip()
+        for chunk in re.split(r"\n\s*\n|(?<=\.)\s+(?=[A-Z0-9])", document_text or "")
+        if len(chunk.strip()) > 40
+    ]
+    if not chunks:
+        return []
+    return _rerank_context(plan, chunks, doc_type, limit=limit) or chunks[:limit]
+
+
 def retriever_node(state: dict) -> dict:
     plan = _normalize_plan(state.get("plan", []))
     doc_id = state.get("doc_id")
     doc_type = state.get("document_type", "other")
+    document_text = state.get("document_text", "")
+    document_chunks = state.get("document_chunks", [])
     context = []
 
     if not plan:
         return {"retrieved_context": []}
 
-    # Embed each plan item and search vector DB
-    embeddings = embedder.encode(plan)
+    try:
+        embeddings = _get_embedder().encode(plan)
 
-    for subtask, emb in zip(plan, embeddings):
-        docs = vector_db.search_similar(emb, top_k=5, doc_id=doc_id)
-        context.extend(docs)
+        for subtask, emb in zip(plan, embeddings):
+            docs = _get_vector_db().search_similar(emb, top_k=5, doc_id=doc_id)
+            context.extend(docs)
+    except Exception as e:
+        logger.warning("Vector retrieval unavailable; using document-text fallback: %s", e)
+        context.extend(_fallback_context_from_document(document_text, plan, doc_type, chunks=document_chunks))
 
     # Rerank using domain-specific terms
     ranked_context = _rerank_context(plan, context, doc_type, limit=8)
+    if not ranked_context:
+        ranked_context = _fallback_context_from_document(document_text, plan, doc_type, limit=8, chunks=document_chunks)
 
     # Fall back to targeted web search when local context is too thin
     if len(ranked_context) < 4:
         web_context = []
-        for subtask in plan[:2]:
-            web_results = web_search.search(
-                _build_web_query(subtask, doc_type),
-                max_results=1
-            )
-            web_context.extend(web_results)
-        ranked_context = _rerank_context(plan, ranked_context + web_context, doc_type, limit=8)
+        try:
+            for subtask in plan[:2]:
+                web_results = _get_web_search().search(
+                    _build_web_query(subtask, doc_type),
+                    max_results=1
+                )
+                web_context.extend(web_results)
+        except Exception as e:
+            logger.warning("Web search unavailable; continuing without web context: %s", e)
+        ranked_context = _rerank_context(plan, ranked_context + web_context, doc_type, limit=8) or ranked_context
 
     return {"retrieved_context": ranked_context}

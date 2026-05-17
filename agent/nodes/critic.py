@@ -4,7 +4,14 @@ import logging
 from core.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
-llm = LLMClient()
+llm = None
+
+
+def _get_llm():
+    global llm
+    if llm is None:
+        llm = LLMClient()
+    return llm
 
 
 # Domain-aware recommendation templates
@@ -70,6 +77,68 @@ RECOMMENDATIONS_BY_TYPE = {
         "blank_fields": "Complete all blank fields with specific, agreed-upon terms before execution.",
         "default": "Replace vague language with specific, enforceable provisions that leave no material terms open.",
     },
+}
+
+
+KNOWN_VALID_CITATIONS_BY_TYPE = {
+    "consumer_loan": [
+        "Truth in Lending Act (TILA) / Regulation Z for APR, finance charge, payment schedule, and disclosure duties",
+        "State usury law, including New York's 16% civil usury and 25% criminal usury thresholds where NY law applies",
+        "UCC Article 9, including UCC 9-611, for security interests, collateral, repossession, and notice before disposition",
+        "GLBA/privacy principles for exposed borrower PII",
+    ],
+    "student_loan": [
+        "Truth in Lending Act (TILA) / Regulation Z for private education loan disclosures",
+        "Higher Education Act for federal student-loan program disclosures and borrower rights",
+    ],
+    "employment": [
+        "FLSA for wage, overtime, and working-hours issues",
+        "FMLA and state leave laws for protected leave",
+        "Title VII / EEOC frameworks for discrimination, harassment, and retaliation issues",
+        "State wage-payment and termination-notice laws where applicable",
+    ],
+    "service_agreement": [
+        "Commercial contract law for scope, payment, warranty, indemnity, termination, and limitation-of-liability terms",
+        "UCC principles only where goods, warranties, or mixed goods/services are actually implicated",
+        "Data protection laws only where the agreement processes personal data",
+        "IP ownership / work-product principles for deliverables",
+    ],
+    "nda": [
+        "Defend Trade Secrets Act (DTSA)",
+        "Uniform Trade Secrets Act (UTSA) or state trade-secret law",
+        "Common-law confidentiality and equitable relief principles",
+    ],
+    "lease": [
+        "State landlord-tenant law for security deposits, habitability, maintenance, eviction, and notice requirements",
+        "Local rent-control or rent-stabilization rules only where the jurisdiction supports them",
+    ],
+    "other": [
+        "General contract-law principles for formation, ambiguity, breach, remedies, governing law, and dispute resolution",
+    ],
+}
+
+
+MISAPPLIED_CITATION_PATTERNS_BY_TYPE = {
+    "consumer_loan": [
+        r"\btila\b.*\b(usury|interest\s+rate\s+cap|rate\s+cap|16%|25%)",
+        r"\b(flsa|fmla|eeoc|title\s+vii|overtime|leave\s+entitlement|working\s+hours)\b",
+    ],
+    "service_agreement": [
+        r"\b(usury|tila|regulation\s+z|borrower|lender|flsa|fmla|overtime|leave\s+entitlement)\b",
+    ],
+    "employment": [
+        r"\b(usury|tila|regulation\s+z|ucc\s+9-611|repossession|borrower|lender)\b",
+    ],
+    "nda": [
+        r"\b(usury|tila|flsa|fmla|security\s+deposit|eviction)\b",
+    ],
+    "lease": [
+        r"\b(usury|tila|flsa|fmla|borrower|lender)\b",
+    ],
+    "student_loan": [
+        r"\b(flsa|fmla|employment|security\s+deposit|eviction)\b",
+    ],
+    "other": [],
 }
 
 
@@ -178,7 +247,6 @@ def _detect_doc_type_from_report(report: str) -> str:
     """Try to extract the document type from the report text, falling back to 'other'."""
     report_lower = report.lower()
     
-    # Check Executive Summary for document type
     type_patterns = [
         (r"document type:\s*consumer\s*loan", "consumer_loan"),
         (r"document type:\s*student\s*loan", "student_loan"),
@@ -192,7 +260,6 @@ def _detect_doc_type_from_report(report: str) -> str:
         if re.search(pattern, report_lower):
             return doc_type
     
-    # Fallback: check for strong indicators in the report
     if "lender" in report_lower and "borrower" in report_lower:
         return "consumer_loan"
     if "employee" in report_lower and "employer" in report_lower:
@@ -203,55 +270,165 @@ def _detect_doc_type_from_report(report: str) -> str:
     return "other"
 
 
+def _safe_str(val) -> str:
+    """Convert any value to a string safely."""
+    try:
+        return str(val).strip()
+    except Exception:
+        return ""
+
+
+def _has_actionable_critique(critique: str) -> bool:
+    """Return true when critique text describes errors that need correction."""
+    text = _safe_str(critique)
+    if not text:
+        return False
+    lowered = text.lower()
+    return (
+        "no critical errors" not in lowered
+        and "source-grounded verification" not in lowered
+    )
+
+
+def _known_valid_citations_for_prompt(doc_type: str) -> str:
+    citations = KNOWN_VALID_CITATIONS_BY_TYPE.get(
+        doc_type,
+        KNOWN_VALID_CITATIONS_BY_TYPE["other"],
+    )
+    return "; ".join(citations)
+
+
+def _critique_item_is_false_positive(item: dict, doc_type: str) -> bool:
+    """Drop framework critiques that merely object to a known-valid citation."""
+    if not isinstance(item, dict):
+        return False
+
+    error_text = _safe_str(item.get("error", item.get("type", ""))).lower()
+    if "wrong legal framework" not in error_text:
+        return False
+
+    detail = " ".join(
+        _safe_str(item.get(key, ""))
+        for key in ("quote", "detail", "reason", "explanation")
+    ).lower()
+    if not detail:
+        return False
+
+    for pattern in MISAPPLIED_CITATION_PATTERNS_BY_TYPE.get(doc_type, []):
+        if re.search(pattern, detail):
+            return False
+
+    known_terms = " ".join(
+        KNOWN_VALID_CITATIONS_BY_TYPE.get(
+            doc_type,
+            KNOWN_VALID_CITATIONS_BY_TYPE["other"],
+        )
+    ).lower()
+    return any(token in known_terms and token in detail for token in _tokenize_for_citation_match(detail))
+
+
+def _tokenize_for_citation_match(text: str) -> list:
+    candidates = [
+        "tila", "truth in lending", "regulation z", "ucc", "ucc 9-611",
+        "uniform commercial code", "usury", "flsa", "fmla", "title vii",
+        "eeoc", "dtsa", "utsa", "trade secret", "landlord", "tenant",
+        "security deposit", "higher education act", "commercial contract",
+    ]
+    lowered = text.lower()
+    return [candidate for candidate in candidates if candidate in lowered]
+
+
+def _dedupe_repeated_sections(report: str) -> str:
+    """Remove repeated markdown sections while preserving the first occurrence."""
+    text = _safe_str(report)
+    if not text:
+        return ""
+
+    matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", text))
+    if not matches:
+        return text
+
+    parts = []
+    prefix = text[:matches[0].start()].strip()
+    if prefix:
+        parts.append(prefix)
+
+    seen = set()
+    for index, match in enumerate(matches):
+        section_start = match.start()
+        section_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        heading_key = re.sub(r"[^a-z0-9]+", " ", match.group(1).lower()).strip()
+        if heading_key in seen:
+            continue
+        seen.add(heading_key)
+        section = text[section_start:section_end].strip()
+        if section:
+            parts.append(section)
+
+    return "\n\n".join(parts).strip()
+
+
 def critic_node(state: dict) -> dict:
     plan = state.get("plan", [])
     context = state.get("retrieved_context", [])
     draft = state.get("draft_report", "")
     doc_type = state.get("document_type", "other")
+    valid_citations = _known_valid_citations_for_prompt(doc_type)
 
-    prompt = f"""You are a strict compliance reviewer VALIDATING a draft audit report.
-Your job is to CATCH ERRORS in the report, not to re-audit the document from scratch.
+    prompt = f"""Validate this compliance report. Do not re-audit from scratch.
 
-THE DOCUMENT TYPE IS: {doc_type}
-DO NOT CHANGE THE DOCUMENT TYPE. The classifier already determined this and it is authoritative.
+Document type: {doc_type}. Never change it.
 
-VALIDATION RULES — flag these as errors:
-1. HALLUCINATION: Does the report reference clauses, sections, numbers, or facts NOT present in the source document? Flag them specifically.
-2. WRONG LEGAL FRAMEWORK: Does the report apply incorrect laws? (e.g., citing TILA for usury caps when state law applies; using employment law on a non-employment contract)
-3. WRONG PARTY BLAMED: Are compliance obligations attributed to the wrong party? (e.g., blaming borrower for lender's TILA disclosure duties)
-4. SEVERITY INCONSISTENCY: Does the same clause get different severity ratings in different parts of the report?
-5. VAGUE RECOMMENDATIONS: Are recommendations generic ("review and update") instead of specific (exact clause language to change)?
-6. CONTRADICTION: Does the report contradict itself or the source document?
+Known-valid references for this type: {valid_citations}
+Do not flag these citations just because they appear. Flag them only when the report applies them to the wrong duty or party.
 
-CRITICAL — DO NOT DO THESE:
-- DO NOT change the document type from "{doc_type}".
-- DO NOT re-analyze the document. You are VALIDATING the report, not writing a new one.
-- DO NOT make subjective legal judgments (e.g., "14.4% is fine"). Only flag factual errors.
-- DO NOT invent missing risks that aren't clearly visible in the document text provided.
+Flag only factual report errors:
+- HALLUCINATION: facts/clauses/citations not in source
+- WRONG LEGAL FRAMEWORK
+- WRONG PARTY BLAMED
+- SEVERITY INCONSISTENCY
+- VAGUE RECOMMENDATIONS
+- CONTRADICTION
 
-TYPE-SPECIFIC RULES:
-- If doc_type is "service_agreement": Mutual limitation of liability clauses are STANDARD and NOT violations. If the report flags a mutual liability cap as a risk, mark it as an ERROR.
-- If doc_type is "consumer_loan": Usury caps come from STATE law (e.g., NY Gen. Oblig. Law), not TILA. TILA is about disclosure, not rate caps. Flag misattribution as an ERROR.
-- If doc_type is "employment": Do not apply lending or commercial contract frameworks.
+Type rules:
+- service_agreement: mutual liability caps are standard; flagging them is an error.
+- consumer_loan: usury caps are state law, not TILA.
+- employment: do not apply lending/commercial frameworks.
 
-You MUST output ONLY a valid JSON object with exactly these keys:
-- "passes_validation": true ONLY if report has NO hallucinations, NO wrong framework, NO contradictory severities, NO vague recommendations
-- "critique": specific errors found with exact quotes from the draft. If no errors, say "No critical errors found."
-- "final_report": the CORRECTED report text (fix errors, remove hallucinations, keep correct findings)
-- "confidence_score": integer 0-100. Lower score = more errors found. 90+ = nearly perfect. 70-89 = minor issues. 50-69 = material errors. Below 50 = unreliable.
-- "missing_risks": array of short strings ONLY for obvious risks clearly visible in the document text that the report completely missed
+YOU MUST VERIFY EVERY CLAIM in the report against the source excerpt:
+1. Is each clause/section reference actually IN the source?
+2. Is each legal citation appropriate for this document type?
+3. Are severity ratings consistent for the same clause everywhere?
+4. Are recommendations specific or vague?
 
-Source Document Excerpt: {str(context)[:2000]}
-Draft Report to Validate:
-{draft[:4000]}
+If the report is flawless, return passes_validation=true and critique=[].
+If you find ANY error, return passes_validation=false with specific critique items.
+NEVER return empty critique without checking — actually read the report.
+
+Return ONLY valid JSON:
+{{"passes_validation": true, "critique": [], "confidence_score": 90, "missing_risks": []}}
+
+Source excerpt:
+{str(context)[:900]}
+
+Draft report:
+{draft[:1500]}
 
 JSON:"""
 
-    for attempt in range(2):
-        response = llm.generate(
+    final_report = draft
+    critique = ""
+    passes = False
+    confidence_score = 40
+    missing_risks = []
+    result = {}
+    fallback_triggered = False
+
+    for attempt in range(3):
+        response = _get_llm().generate(
             prompt,
             json_mode=True,
-            max_tokens=3000,
+            max_tokens=3072,
             use_reasoning=True
         )
         logger.info(f"Critic raw response (attempt {attempt+1}, first 500 chars): {response[:500]}")
@@ -262,27 +439,78 @@ JSON:"""
         logger.warning("All attempts to get valid JSON from critic failed. Using conservative fallback.")
         result = {}
 
+    if result and "error" in result and not any(
+        key in result for key in ("passes_validation", "critique", "confidence_score", "missing_risks")
+    ):
+        logger.warning("Critic LLM returned an error object. Using conservative fallback.")
+        result = {}
+
     if not result:
+        fallback_triggered = True
+        logger.warning("Critic fallback triggered — final report is unchanged draft.")
         result = {
             "passes_validation": False,
             "critique": _generate_fallback_critique(draft, doc_type),
-            "final_report": draft,
             "confidence_score": 40,
             "missing_risks": [],
         }
 
     passes = bool(result.get("passes_validation", False))
-    critique = result.get("critique", "").strip()
-    final_report = result.get("final_report", draft)
+    critique_raw = result.get("critique", "")
+    if isinstance(critique_raw, list):
+        critique_parts = []
+        for item in critique_raw:
+            try:
+                if isinstance(item, dict):
+                    if _critique_item_is_false_positive(item, doc_type):
+                        logger.info("Dropped false-positive framework critique for doc_type=%s: %s", doc_type, item)
+                        continue
+                    err = item.get("error", "")
+                    if not err or not err.strip():
+                        continue
+                    q = item.get("quote", "")
+                    line = f"- {err}"
+                    if q:
+                        line += f"\n  Quote: {q}"
+                    critique_parts.append(line)
+                elif isinstance(item, str):
+                    critique_parts.append(f"- {item}")
+            except Exception:
+                critique_parts.append("- [unparseable critique item]")
+        critique = "\n".join(critique_parts)
+    elif isinstance(critique_raw, str):
+        critique = critique_raw.strip()
+    else:
+        critique = ""
+
+    errors_found = _has_actionable_critique(critique)
+
     confidence_score = result.get("confidence_score", 40)
-    missing_risks = result.get("missing_risks", [])
+    missing_risks_raw = result.get("missing_risks", [])
 
     if not critique:
-        critique = _generate_fallback_critique(draft, doc_type)
+        critique = _generate_fallback_critique(draft, doc_type) if fallback_triggered else "No critical errors found."
+        errors_found = _has_actionable_critique(critique)
 
-    if not isinstance(missing_risks, list):
-        missing_risks = []
-    missing_risks = [str(item).strip() for item in missing_risks if str(item).strip()]
+    if not isinstance(missing_risks_raw, list):
+        missing_risks_raw = []
+    missing_risks = []
+    for item in missing_risks_raw:
+        try:
+            if isinstance(item, dict):
+                risk_text = _safe_str(item.get("risk", item.get("error", item.get("detail", ""))))
+                if risk_text:
+                    missing_risks.append(risk_text)
+            elif isinstance(item, str):
+                stripped = item.strip()
+                if stripped:
+                    missing_risks.append(stripped)
+            elif item is not None:
+                s = _safe_str(item)
+                if s:
+                    missing_risks.append(s)
+        except Exception:
+            continue
 
     try:
         confidence_score = int(confidence_score)
@@ -290,14 +518,51 @@ JSON:"""
         confidence_score = 40
     confidence_score = max(0, min(100, confidence_score))
 
-    # Use the doc_type from the report itself if state has "other" but report says otherwise
+    error_count = 0
+    if errors_found:
+        for err_type in ["HALLUCINATION", "WRONG LEGAL FRAMEWORK", "WRONG PARTY BLAMED",
+                         "SEVERITY INCONSISTENCY", "VAGUE RECOMMENDATIONS", "CONTRADICTION"]:
+            if err_type in critique.upper():
+                error_count += 1
+    risk_count = len(missing_risks)
+
+    if fallback_triggered:
+        confidence_score = min(confidence_score, 45)
+    else:
+        penalty = min(error_count * 12, 48) + min(risk_count * 6, 18)
+        if errors_found or risk_count:
+            confidence_score = min(confidence_score, 88) if confidence_score else 88
+            confidence_score = max(35, confidence_score - penalty)
+        else:
+            confidence_score = max(confidence_score, 90)
+
+    # Consistency guard
+    if errors_found or missing_risks:
+        passes = False
+    elif not fallback_triggered:
+        passes = True
+    if passes and confidence_score < 60:
+        passes = False
+        critique = (critique or "") + "\nValidation overridden: confidence score too low to certify report."
+
     effective_doc_type = doc_type
     if doc_type == "other":
         detected = _detect_doc_type_from_report(final_report)
         if detected != "other":
             effective_doc_type = detected
 
-    final_report = _inject_missing_risks(final_report, missing_risks, effective_doc_type)
+    try:
+        final_report = _inject_missing_risks(final_report, missing_risks, effective_doc_type)
+    except Exception as e:
+        logger.error(f"_inject_missing_risks failed: {e}")
+
+    if errors_found and "Corrections Required (Critic-Identified)" not in _safe_str(final_report):
+        corrections = "\n\n## ⚠️ Corrections Required (Critic-Identified)\n"
+        corrections += "The following issues were flagged. Report body preserved for human review:\n\n"
+        corrections += critique + "\n"
+        final_report = corrections + _safe_str(final_report or draft)
+
+    final_report = _dedupe_repeated_sections(final_report or draft)
 
     return {
         "passes_validation": passes,
@@ -305,4 +570,5 @@ JSON:"""
         "final_report": final_report,
         "confidence_score": confidence_score,
         "missing_risks": missing_risks,
+        "_fallback_triggered": fallback_triggered,
     }

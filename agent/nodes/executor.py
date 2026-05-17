@@ -1,7 +1,17 @@
+import re
+import logging
 from core.llm_client import LLMClient
 from core.classifier import get_party_labels, ContractType
 
-llm = LLMClient()
+logger = logging.getLogger(__name__)
+llm = None
+
+
+def _get_llm():
+    global llm
+    if llm is None:
+        llm = LLMClient()
+    return llm
 
 
 # Type‑specific report requirements to prevent cross‑contamination
@@ -130,6 +140,61 @@ Recommended Actions must be contract‑general.
 }
 
 
+def _clean_draft_report(draft: str) -> str:
+    """Remove prompt leakage that can appear after the generated report."""
+    if not draft:
+        return ""
+
+    cleaned = draft.strip()
+    first_report_heading = re.search(r"(?im)^#{1,2}\s+Executive Summary\s*$", cleaned)
+    if first_report_heading:
+        cleaned = cleaned[first_report_heading.start():]
+
+    leakage_markers = [
+        r"(?im)^\s*(?:[-*_]{3,}\s*)?(?:#{1,6}\s*)?CRITICAL\s+RULES\b",
+        r"(?im)^\s*(?:[-*_]{3,}\s*)?DOCUMENT\s+TYPE:",
+        r"(?im)^\s*(?:[-*_]{3,}\s*)?PARTY\s+RELATIONSHIP:",
+        r"(?im)^\s*(?:[-*_]{3,}\s*)?AUDIT\s+PLAN:",
+        r"(?im)^\s*(?:[-*_]{3,}\s*)?SOURCE\s+DOCUMENT\s+EXCERPT:",
+        r"(?im)^\s*(?:[-*_]{3,}\s*)?RETRIEVED\s+LEGAL\s+CONTEXT:",
+        r"(?im)^\s*(?:[-*_]{3,}\s*)?(?:#{1,6}\s*)?Draft\s+Report:\s*$",
+    ]
+    for marker in leakage_markers:
+        match = re.search(marker, cleaned)
+        if match:
+            cleaned = cleaned[:match.start()].strip()
+            break
+
+    cleaned = _dedupe_repeated_sections(cleaned)
+    logger.info("Cleaned draft report: before=%s after=%s", len(draft), len(cleaned))
+    return cleaned.strip()
+
+
+def _dedupe_repeated_sections(report: str) -> str:
+    """Keep the first occurrence of each top-level markdown section."""
+    text = report.strip()
+    matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", text))
+    if not matches:
+        return text
+
+    parts = []
+    prefix = text[:matches[0].start()].strip()
+    if prefix:
+        parts.append(prefix)
+
+    seen = set()
+    for index, match in enumerate(matches):
+        section_start = match.start()
+        section_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        heading_key = re.sub(r"[^a-z0-9]+", " ", match.group(1).lower()).strip()
+        if heading_key in seen:
+            continue
+        seen.add(heading_key)
+        parts.append(text[section_start:section_end].strip())
+
+    return "\n\n".join(part for part in parts if part).strip()
+
+
 def _build_executor_prompt(
     plan: list,
     context: list,
@@ -142,23 +207,23 @@ def _build_executor_prompt(
     Build a type‑specific executor prompt that prevents cross‑domain
     contamination and enforces severity consistency.
     """
-    
+
     plan_str = "\n".join(f"- {item}" for item in plan) if plan else "No plan provided."
     context_str = "\n\n".join(context[:10]) if context else "No additional legal context retrieved."
     document_excerpt = document_text[:5000]
-    
+
     # Include pre-detected issues
     issues_str = ""
     if pre_detected_issues:
         issues_str = "\nPRE-DETECTED STRUCTURAL ISSUES (must be addressed in report):\n"
         for issue in pre_detected_issues:
             issues_str += f"- [{issue['severity']}] {issue['detail']}\n"
-    
+
     type_instructions = TYPE_SPECIFIC_INSTRUCTIONS.get(
         doc_type,
         TYPE_SPECIFIC_INSTRUCTIONS["other"]
     )
-    
+
     return f"""You are a senior compliance analyst preparing a production‑quality compliance risk assessment.
 
 DOCUMENT TYPE: {doc_type}
@@ -211,9 +276,8 @@ Write a structured professional report with these exact sections:
 2. **Action** — be concrete: what language to add, replace, cap, clarify, or remove
 
 ## Confidence Score
-- Score 0‑100 reflecting evidentiary support and legal precision
-- Note any limitations (missing clauses, unclear jurisdiction)
-
+- Score: [single integer 0-100 ONLY. Do NOT split into sub-scores.]
+- Note any limitations
 ---
 
 CRITICAL RULES — VIOLATION = INCORRECT REPORT:
@@ -234,30 +298,30 @@ CRITICAL RULES — VIOLATION = INCORRECT REPORT:
 
 8. ADDRESS PRE-DETECTED ISSUES: If pre-detected structural issues are listed above, you MUST include them in the Structural Issues section of the report.
 
-Draft Report:"""
+"""
 
 
 def executor_node(state: dict) -> dict:
     # GATE: Handle non-auditable documents
     if state.get("document_type") == "non_auditable":
         return {
-            "draft_report": "## ⚠️ Cannot Audit This Document\n\n" + 
+            "draft_report": "## ⚠️ Cannot Audit This Document\n\n" +
                            state.get("error", "Invalid document type. Please upload a contract, policy, or legal agreement.")
         }
-    
+
     plan = state.get("plan", [])
     context = state.get("retrieved_context", [])
     doc_type = state.get("document_type", "other")
     document_text = state.get("document_text", "")
     pre_detected_issues = state.get("pre_detected_issues", [])
-    
+
     # Get party labels for this document type
     try:
         contract_type = ContractType(doc_type)
     except ValueError:
         contract_type = ContractType.OTHER
     parties = get_party_labels(contract_type)
-    
+
     prompt = _build_executor_prompt(
         plan=plan,
         context=context,
@@ -266,6 +330,13 @@ def executor_node(state: dict) -> dict:
         parties=parties,
         pre_detected_issues=pre_detected_issues,
     )
-    
-    draft = llm.generate(prompt, max_tokens=2000)
-    return {"draft_report": draft}
+
+    for attempt in range(2):
+        response = _get_llm().generate(prompt, max_tokens=4096)
+        if response and len(response) > 200:
+            draft = _clean_draft_report(response)
+            if len(draft) > 200 and not draft.startswith("⚠️"):
+                return {"draft_report": draft}
+
+    # Fallback
+    return {"draft_report": "## ⚠️ Report Generation Failed\n\nThe system was unable to generate a compliance report. Please try again."}
